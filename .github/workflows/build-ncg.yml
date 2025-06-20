@@ -84,18 +84,19 @@ jobs:
         $pkgConfigPath = "C:\vcpkg\installed\x64-windows-static\lib\pkgconfig"
         New-Item -ItemType Directory -Force -Path $pkgConfigPath
         
-        @'
+        $opusPC = @"
 prefix=C:/vcpkg/installed/x64-windows-static
-exec_prefix=${prefix}
-libdir=${exec_prefix}/lib
-includedir=${prefix}/include
+exec_prefix=`${prefix}
+libdir=`${exec_prefix}/lib
+includedir=`${prefix}/include
 
 Name: Opus
 Description: Opus codec
 Version: 1.4
-Libs: -L${libdir} -lopus
-Cflags: -I${includedir}
-'@ | Out-File -FilePath "$pkgConfigPath\opus.pc" -Encoding UTF8
+Libs: -L`${libdir} -lopus
+Cflags: -I`${includedir}
+"@
+        $opusPC | Out-File -FilePath "$pkgConfigPath\opus.pc" -Encoding UTF8
         
         echo "PKG_CONFIG_PATH=$pkgConfigPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
     
@@ -109,11 +110,12 @@ Cflags: -I${includedir}
         $cargo | Set-Content Cargo.toml
         
         # Create custom server config
-        @'
-        pub const CUSTOM_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com:21116";
-        pub const RELAY_SERVER: &str = "rust.northwoodscomputerguy.com:21117";
-        pub const PUBLIC_KEY: &str = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=";
-        '@ | Out-File -FilePath "src/ncg_config.rs" -Encoding UTF8
+        $serverConfig = @"
+pub const CUSTOM_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com:21116";
+pub const RELAY_SERVER: &str = "rust.northwoodscomputerguy.com:21117";
+pub const PUBLIC_KEY: &str = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=";
+"@
+        $serverConfig | Out-File -FilePath "src/ncg_config.rs" -Encoding UTF8
         
         # Patch build.rs to use our config
         if (Test-Path "build.rs") {
@@ -172,82 +174,85 @@ Cflags: -I${includedir}
         }
         
         # Create config file with NCG server
-        @"
-        rendezvous_server = 'rust.northwoodscomputerguy.com:21116'
-        nat_type = 1
-        serial = 0
-        
-        [options]
-        custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116'
-        key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY='
-        relay-server = 'rust.northwoodscomputerguy.com:21117'
-        api-server = ''
-        "@ | Out-File -FilePath "$output\RustDesk2.toml" -Encoding UTF8
+        $rustdeskConfig = @"
+rendezvous_server = 'rust.northwoodscomputerguy.com:21116'
+nat_type = 1
+serial = 0
+
+[options]
+custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116'
+key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY='
+relay-server = 'rust.northwoodscomputerguy.com:21117'
+api-server = ''
+"@
+        $rustdeskConfig | Out-File -FilePath "$output\RustDesk2.toml" -Encoding UTF8
         
         # Create startup batch file
-        @"
-        @echo off
-        title NCG Remote Access
-        color 0A
-        echo =======================================
-        echo    NCG Remote Access Tool
-        echo    Version 1.4.0 (Custom Build)
-        echo =======================================
-        echo.
-        echo Starting NCG Remote Access...
-        echo.
-        start "" "NCG-Remote-Access.exe"
-        echo.
-        echo Your ID will appear in the main window.
-        echo Share this ID with NCG support when requested.
-        echo.
-        echo Server: rust.northwoodscomputerguy.com
-        echo Support: https://northwoodscomputerguy.com
-        echo.
-        echo Press any key to close this window...
-        pause >nul
-        "@ | Out-File -FilePath "$output\Start-NCG-Remote.bat" -Encoding ASCII
+        $batchFile = @"
+@echo off
+title NCG Remote Access
+color 0A
+echo =======================================
+echo    NCG Remote Access Tool
+echo    Version 1.4.0 (Custom Build)
+echo =======================================
+echo.
+echo Starting NCG Remote Access...
+echo.
+start "" "NCG-Remote-Access.exe"
+echo.
+echo Your ID will appear in the main window.
+echo Share this ID with NCG support when requested.
+echo.
+echo Server: rust.northwoodscomputerguy.com
+echo Support: https://northwoodscomputerguy.com
+echo.
+echo Press any key to close this window...
+pause >nul
+"@
+        $batchFile | Out-File -FilePath "$output\Start-NCG-Remote.bat" -Encoding ASCII
         
         # Create README
-        @"
-        NCG Remote Access Tool
-        ======================
-        Version: 1.4.0 (Custom Build)
-        Build Date: $(Get-Date -Format "yyyy-MM-dd HH:mm")
-        
-        QUICK START:
-        ------------
-        1. Double-click "Start-NCG-Remote.bat" or "NCG-Remote-Access.exe"
-        2. Your ID will be displayed in the main window
-        3. Share this ID with NCG support when requested
-        
-        FEATURES:
-        ---------
-        ✅ Connects to NCG's private server for security
-        ✅ No installation required (portable)
-        ✅ Automatic configuration
-        ✅ Based on RustDesk 1.4 (stable version)
-        
-        TROUBLESHOOTING:
-        ----------------
-        If the program doesn't start:
-        1. Make sure Windows Defender isn't blocking it
-        2. Try right-click > "Run as Administrator"
-        3. Check that you have Visual C++ Redistributables installed
-        4. Contact support at https://northwoodscomputerguy.com
-        
-        SERVER DETAILS:
-        ---------------
-        Server: rust.northwoodscomputerguy.com
-        Port: 21116 (main), 21117 (relay)
-        
-        SUPPORT:
-        --------
-        Website: https://northwoodscomputerguy.com
-        
-        This tool is configured to connect exclusively to NCG's
-        secure server infrastructure for your privacy and security.
-        "@ | Out-File -FilePath "$output\README.txt" -Encoding UTF8
+        $readme = @"
+NCG Remote Access Tool
+======================
+Version: 1.4.0 (Custom Build)
+Build Date: $(Get-Date -Format "yyyy-MM-dd HH:mm")
+
+QUICK START:
+------------
+1. Double-click "Start-NCG-Remote.bat" or "NCG-Remote-Access.exe"
+2. Your ID will be displayed in the main window
+3. Share this ID with NCG support when requested
+
+FEATURES:
+---------
+✅ Connects to NCG's private server for security
+✅ No installation required (portable)
+✅ Automatic configuration
+✅ Based on RustDesk 1.4 (stable version)
+
+TROUBLESHOOTING:
+----------------
+If the program doesn't start:
+1. Make sure Windows Defender isn't blocking it
+2. Try right-click > "Run as Administrator"
+3. Check that you have Visual C++ Redistributables installed
+4. Contact support at https://northwoodscomputerguy.com
+
+SERVER DETAILS:
+---------------
+Server: rust.northwoodscomputerguy.com
+Port: 21116 (main), 21117 (relay)
+
+SUPPORT:
+--------
+Website: https://northwoodscomputerguy.com
+
+This tool is configured to connect exclusively to NCG's
+secure server infrastructure for your privacy and security.
+"@
+        $readme | Out-File -FilePath "$output\README.txt" -Encoding UTF8
         
         # Create version info
         @{
