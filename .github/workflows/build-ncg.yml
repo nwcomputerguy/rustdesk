@@ -2,7 +2,7 @@ name: Build NCG Remote Access
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, ncg-1.4 ]
   workflow_dispatch:
 
 env:
@@ -11,6 +11,8 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: "-C target-feature=+crt-static"
+  # Fix for opus build
+  VCPKG_ROOT: "C:\\vcpkg"
 
 jobs:
   build-windows:
@@ -65,24 +67,37 @@ jobs:
         bootstrap-vcpkg.bat
         vcpkg.exe integrate install
         vcpkg.exe install --triplet x64-windows-static libvpx libyuv opus aom
-        echo Checking opus installation...
+        echo === Checking opus installation ===
         dir C:\vcpkg\installed\x64-windows-static\include\opus\
+        echo === Checking opus lib ===
+        dir C:\vcpkg\installed\x64-windows-static\lib\
     
-    - name: Check Sciter files
+    - name: Set build environment
       shell: powershell
       run: |
-        # Check if Sciter files exist
-        if (Test-Path "target/debug/api.include") {
-            Write-Host "Sciter files already exist"
-        } else {
-            Write-Host "Downloading Sciter SDK..."
-            # Create directories
-            New-Item -ItemType Directory -Force -Path "target/debug"
-            
-            # Download Sciter SDK
-            $sciterUrl = "https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll"
-            Invoke-WebRequest -Uri $sciterUrl -OutFile "target/debug/sciter.dll"
-        }
+        # Set VCPKG paths
+        echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "BINDGEN_EXTRA_CLANG_ARGS=-IC:\vcpkg\installed\x64-windows-static\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "LIBCLANG_PATH=${{ runner.temp }}\llvm\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        
+        # Create opus pkg-config file for fallback
+        $pkgConfigPath = "C:\vcpkg\installed\x64-windows-static\lib\pkgconfig"
+        New-Item -ItemType Directory -Force -Path $pkgConfigPath
+        
+        @'
+prefix=C:/vcpkg/installed/x64-windows-static
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: Opus
+Description: Opus codec
+Version: 1.4
+Libs: -L${libdir} -lopus
+Cflags: -I${includedir}
+'@ | Out-File -FilePath "$pkgConfigPath\opus.pc" -Encoding UTF8
+        
+        echo "PKG_CONFIG_PATH=$pkgConfigPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
     
     - name: Customize for NCG
       shell: powershell
@@ -93,43 +108,54 @@ jobs:
         $cargo = $cargo -replace 'FileDescription = "RustDesk Remote Desktop"', 'FileDescription = "NCG Remote Access Tool"'
         $cargo | Set-Content Cargo.toml
         
-        # Create custom server config file (don't modify build.rs)
+        # Create custom server config
         @'
         pub const CUSTOM_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com:21116";
         pub const RELAY_SERVER: &str = "rust.northwoodscomputerguy.com:21117";
         pub const PUBLIC_KEY: &str = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=";
         '@ | Out-File -FilePath "src/ncg_config.rs" -Encoding UTF8
+        
+        # Patch build.rs to use our config
+        if (Test-Path "build.rs") {
+            $buildrs = Get-Content build.rs -Raw
+            if ($buildrs -notmatch "ncg_config") {
+                # Add our config module at the beginning
+                $insertion = @"
+        // NCG custom configuration
+        std::fs::write(
+            std::path::Path::new(&out_dir).join("ncg_config.rs"),
+            include_str!("src/ncg_config.rs")
+        ).unwrap();
+        println!("cargo:rustc-cfg=feature=\"ncg_custom\"");
+        
+"@
+                $buildrs = $buildrs -replace "(fn main\(\)\s*\{)", "`$1`n$insertion"
+                $buildrs | Set-Content build.rs
+            }
+        }
     
-    - name: Generate Sciter bindings
-      shell: cmd
-      run: |
-        echo Skipping inline-sciter for now...
-        REM cd res
-        REM python inline-sciter.py
-        REM cd ..
-    
-    - name: Build RustDesk (Attempt 1 - Full features)
-      continue-on-error: true
-      id: build_full
+    - name: Build RustDesk (Full build with audio)
       shell: cmd
       run: |
         set VCPKG_ROOT=C:\vcpkg
         set LIBCLANG_PATH=${{ runner.temp }}/llvm/bin
         set BINDGEN_EXTRA_CLANG_ARGS=-I"C:\vcpkg\installed\x64-windows-static\include"
-        echo Attempting full build...
+        echo === Build environment ===
+        echo VCPKG_ROOT=%VCPKG_ROOT%
+        echo PKG_CONFIG_PATH=%PKG_CONFIG_PATH%
+        echo BINDGEN_EXTRA_CLANG_ARGS=%BINDGEN_EXTRA_CLANG_ARGS%
+        echo === Starting build ===
         cargo build --release --verbose
     
-    - name: Build RustDesk (Attempt 2 - Without problematic features)
-      if: steps.build_full.outcome == 'failure'
+    - name: Build RustDesk (Fallback - No audio)
+      if: failure()
       shell: cmd
       run: |
-        echo Full build failed, trying minimal build...
-        cargo build --release --no-default-features --verbose 2>&1 || (
-          echo Build failed with inline feature, trying without...
-          cargo build --release --verbose
-        )
+        echo === Full build failed, trying without audio features ===
+        cargo build --release --no-default-features --features "use_rubato use_dasp" --verbose
     
     - name: Package NCG Remote
+      if: success()
       shell: powershell
       run: |
         # Create output directory
@@ -139,9 +165,9 @@ jobs:
         # Copy main executable
         if (Test-Path "target\release\rustdesk.exe") {
             Copy-Item "target\release\rustdesk.exe" "$output\NCG-Remote-Access.exe"
-            Write-Host "Copied main executable"
+            Write-Host "✅ Copied main executable"
         } else {
-            Write-Host "ERROR: rustdesk.exe not found!"
+            Write-Host "❌ ERROR: rustdesk.exe not found!"
             exit 1
         }
         
@@ -162,27 +188,32 @@ jobs:
         @"
         @echo off
         title NCG Remote Access
+        color 0A
         echo =======================================
         echo    NCG Remote Access Tool
+        echo    Version 1.4.0 (Custom Build)
         echo =======================================
         echo.
         echo Starting NCG Remote Access...
         echo.
         start "" "NCG-Remote-Access.exe"
+        echo.
         echo Your ID will appear in the main window.
         echo Share this ID with NCG support when requested.
         echo.
+        echo Server: rust.northwoodscomputerguy.com
         echo Support: https://northwoodscomputerguy.com
         echo.
-        timeout /t 5
+        echo Press any key to close this window...
+        pause >nul
         "@ | Out-File -FilePath "$output\Start-NCG-Remote.bat" -Encoding ASCII
         
         # Create README
         @"
         NCG Remote Access Tool
         ======================
-        Version: 1.4.0
-        Build Date: $(Get-Date -Format "yyyy-MM-dd")
+        Version: 1.4.0 (Custom Build)
+        Build Date: $(Get-Date -Format "yyyy-MM-dd HH:mm")
         
         QUICK START:
         ------------
@@ -192,23 +223,30 @@ jobs:
         
         FEATURES:
         ---------
-        - Connects to NCG's private server for security
-        - No installation required (portable)
-        - Automatic configuration
+        ✅ Connects to NCG's private server for security
+        ✅ No installation required (portable)
+        ✅ Automatic configuration
+        ✅ Based on RustDesk 1.4 (stable version)
         
         TROUBLESHOOTING:
         ----------------
         If the program doesn't start:
         1. Make sure Windows Defender isn't blocking it
         2. Try right-click > "Run as Administrator"
-        3. Contact support at https://northwoodscomputerguy.com
+        3. Check that you have Visual C++ Redistributables installed
+        4. Contact support at https://northwoodscomputerguy.com
+        
+        SERVER DETAILS:
+        ---------------
+        Server: rust.northwoodscomputerguy.com
+        Port: 21116 (main), 21117 (relay)
         
         SUPPORT:
         --------
         Website: https://northwoodscomputerguy.com
         
         This tool is configured to connect exclusively to NCG's
-        secure server infrastructure.
+        secure server infrastructure for your privacy and security.
         "@ | Out-File -FilePath "$output\README.txt" -Encoding UTF8
         
         # Create version info
@@ -218,13 +256,20 @@ jobs:
             BuildDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
             GitCommit = "${{ github.sha }}"
             Server = "rust.northwoodscomputerguy.com"
+            Features = if (Test-Path "target\release\rustdesk.exe") { "Full" } else { "Minimal" }
         } | ConvertTo-Json | Out-File -FilePath "$output\version.json" -Encoding UTF8
         
-        # Zip the portable version
-        Compress-Archive -Path "$output\*" -DestinationPath "NCG-Remote-Portable.zip" -Force
+        # List all files in the package
+        Write-Host "📦 Package contents:"
+        Get-ChildItem $output | Format-Table Name, Length, LastWriteTime
         
-        Write-Host "Package created successfully!"
-        Get-ChildItem $output
+        # Get file size
+        $exeSize = (Get-Item "$output\NCG-Remote-Access.exe").Length / 1MB
+        Write-Host "✅ Executable size: $([math]::Round($exeSize, 2)) MB"
+        
+        # Create ZIP archive
+        Compress-Archive -Path "$output\*" -DestinationPath "NCG-Remote-Portable.zip" -Force
+        Write-Host "✅ Created NCG-Remote-Portable.zip"
     
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
@@ -235,11 +280,11 @@ jobs:
           NCG-Remote-Portable/
     
     - name: Create Release
-      if: github.event_name == 'workflow_dispatch'
+      if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: v1.4.0.${{ github.run_number }}
-        name: NCG Remote Access v1.4.0.${{ github.run_number }}
+        tag_name: v1.4.0-ncg.${{ github.run_number }}
+        name: NCG Remote Access v1.4.0 Build ${{ github.run_number }}
         body: |
           # NCG Remote Access Tool
           
@@ -252,13 +297,15 @@ jobs:
           3. Share your ID with NCG support when requested
           
           ## ✨ Features
-          - Based on RustDesk 1.4.0
+          - Based on RustDesk 1.4.0 (stable version)
           - Pre-configured for NCG's secure server
           - Portable - no installation required
           - Windows 7, 8, 10, and 11 compatible
           
           ## 🔒 Security
           This build connects exclusively to NCG's private server infrastructure.
+          
+          Server: `rust.northwoodscomputerguy.com`
           
           ## 📞 Support
           Visit: https://northwoodscomputerguy.com
