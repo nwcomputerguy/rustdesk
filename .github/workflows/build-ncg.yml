@@ -50,6 +50,12 @@ jobs:
     - name: Install NASM
       uses: ilammy/setup-nasm@v1
     
+    - name: Install LLVM
+      uses: KyleMayes/install-llvm-action@v2
+      with:
+        version: "16.0"
+        directory: ${{ runner.temp }}/llvm
+    
     - name: Install vcpkg dependencies
       shell: cmd
       run: |
@@ -102,13 +108,23 @@ jobs:
         REM python inline-sciter.py
         REM cd ..
     
-    - name: Build RustDesk
+    - name: Build RustDesk (Attempt 1 - Full features)
+      continue-on-error: true
+      id: build_full
       shell: cmd
       run: |
         set VCPKG_ROOT=C:\vcpkg
-        set LIBCLANG_PATH=C:\Program Files\LLVM\bin
-        echo Building without inline feature...
-        cargo build --release --verbose 2>&1 || (
+        set LIBCLANG_PATH=${{ runner.temp }}/llvm/bin
+        set BINDGEN_EXTRA_CLANG_ARGS=-I"C:\vcpkg\installed\x64-windows-static\include"
+        echo Attempting full build...
+        cargo build --release --verbose
+    
+    - name: Build RustDesk (Attempt 2 - Without problematic features)
+      if: steps.build_full.outcome == 'failure'
+      shell: cmd
+      run: |
+        echo Full build failed, trying minimal build...
+        cargo build --release --no-default-features --verbose 2>&1 || (
           echo Build failed with inline feature, trying without...
           cargo build --release --verbose
         )
