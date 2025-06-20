@@ -11,7 +11,6 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: "-C target-feature=+crt-static"
-  # Fix for opus build
   VCPKG_ROOT: "C:\\vcpkg"
 
 jobs:
@@ -75,28 +74,27 @@ jobs:
     - name: Set build environment
       shell: powershell
       run: |
-        # Set VCPKG paths
         echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         echo "BINDGEN_EXTRA_CLANG_ARGS=-IC:\vcpkg\installed\x64-windows-static\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         echo "LIBCLANG_PATH=${{ runner.temp }}\llvm\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         
-        # Create opus pkg-config file for fallback
         $pkgConfigPath = "C:\vcpkg\installed\x64-windows-static\lib\pkgconfig"
         New-Item -ItemType Directory -Force -Path $pkgConfigPath
         
-        $opusPC = @"
-prefix=C:/vcpkg/installed/x64-windows-static
-exec_prefix=`${prefix}
-libdir=`${exec_prefix}/lib
-includedir=`${prefix}/include
-
-Name: Opus
-Description: Opus codec
-Version: 1.4
-Libs: -L`${libdir} -lopus
-Cflags: -I`${includedir}
-"@
-        $opusPC | Out-File -FilePath "$pkgConfigPath\opus.pc" -Encoding UTF8
+        # Create opus.pc file content line by line
+        $opusLines = @(
+            "prefix=C:/vcpkg/installed/x64-windows-static",
+            "exec_prefix=`${prefix}",
+            "libdir=`${exec_prefix}/lib",
+            "includedir=`${prefix}/include",
+            "",
+            "Name: Opus",
+            "Description: Opus codec",
+            "Version: 1.4",
+            "Libs: -L`${libdir} -lopus",
+            "Cflags: -I`${includedir}"
+        )
+        $opusLines -join "`n" | Out-File -FilePath "$pkgConfigPath\opus.pc" -Encoding UTF8
         
         echo "PKG_CONFIG_PATH=$pkgConfigPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
     
@@ -110,33 +108,15 @@ Cflags: -I`${includedir}
         $cargo | Set-Content Cargo.toml
         
         # Create custom server config
-        $serverConfig = @"
-pub const CUSTOM_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com:21116";
-pub const RELAY_SERVER: &str = "rust.northwoodscomputerguy.com:21117";
-pub const PUBLIC_KEY: &str = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=";
-"@
-        $serverConfig | Out-File -FilePath "src/ncg_config.rs" -Encoding UTF8
-        
-        # Patch build.rs to use our config
-        if (Test-Path "build.rs") {
-            $buildrs = Get-Content build.rs -Raw
-            if ($buildrs -notmatch "ncg_config") {
-                # Add our config module at the beginning
-                $insertion = @"
-        // NCG custom configuration
-        std::fs::write(
-            std::path::Path::new(&out_dir).join("ncg_config.rs"),
-            include_str!("src/ncg_config.rs")
-        ).unwrap();
-        println!("cargo:rustc-cfg=feature=\"ncg_custom\"");
-        
-"@
-                $buildrs = $buildrs -replace "(fn main\(\)\s*\{)", "`$1`n$insertion"
-                $buildrs | Set-Content build.rs
-            }
-        }
+        New-Item -ItemType Directory -Force -Path "src"
+        $configLines = @(
+            'pub const CUSTOM_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com:21116";',
+            'pub const RELAY_SERVER: &str = "rust.northwoodscomputerguy.com:21117";',
+            'pub const PUBLIC_KEY: &str = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=";'
+        )
+        $configLines -join "`n" | Out-File -FilePath "src/ncg_config.rs" -Encoding UTF8
     
-    - name: Build RustDesk (Full build with audio)
+    - name: Build RustDesk Full
       shell: cmd
       run: |
         set VCPKG_ROOT=C:\vcpkg
@@ -145,136 +125,96 @@ pub const PUBLIC_KEY: &str = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=";
         echo === Build environment ===
         echo VCPKG_ROOT=%VCPKG_ROOT%
         echo PKG_CONFIG_PATH=%PKG_CONFIG_PATH%
-        echo BINDGEN_EXTRA_CLANG_ARGS=%BINDGEN_EXTRA_CLANG_ARGS%
         echo === Starting build ===
         cargo build --release --verbose
     
-    - name: Build RustDesk (Fallback - No audio)
+    - name: Build RustDesk Minimal
       if: failure()
       shell: cmd
       run: |
-        echo === Full build failed, trying without audio features ===
+        echo === Full build failed, trying without audio ===
         cargo build --release --no-default-features --features "use_rubato use_dasp" --verbose
     
     - name: Package NCG Remote
       if: success()
       shell: powershell
       run: |
-        # Create output directory
         $output = "NCG-Remote-Portable"
         New-Item -ItemType Directory -Force -Path $output
         
-        # Copy main executable
         if (Test-Path "target\release\rustdesk.exe") {
             Copy-Item "target\release\rustdesk.exe" "$output\NCG-Remote-Access.exe"
-            Write-Host "✅ Copied main executable"
+            Write-Host "Copied main executable"
         } else {
-            Write-Host "❌ ERROR: rustdesk.exe not found!"
+            Write-Host "ERROR: rustdesk.exe not found!"
             exit 1
         }
         
-        # Create config file with NCG server
-        $rustdeskConfig = @"
-rendezvous_server = 'rust.northwoodscomputerguy.com:21116'
-nat_type = 1
-serial = 0
-
-[options]
-custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116'
-key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY='
-relay-server = 'rust.northwoodscomputerguy.com:21117'
-api-server = ''
-"@
-        $rustdeskConfig | Out-File -FilePath "$output\RustDesk2.toml" -Encoding UTF8
+        # Create config file
+        $configLines = @(
+            "rendezvous_server = 'rust.northwoodscomputerguy.com:21116'",
+            "nat_type = 1",
+            "serial = 0",
+            "",
+            "[options]",
+            "custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116'",
+            "key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY='",
+            "relay-server = 'rust.northwoodscomputerguy.com:21117'",
+            "api-server = ''"
+        )
+        $configLines -join "`n" | Out-File -FilePath "$output\RustDesk2.toml" -Encoding UTF8
         
-        # Create startup batch file
-        $batchFile = @"
-@echo off
-title NCG Remote Access
-color 0A
-echo =======================================
-echo    NCG Remote Access Tool
-echo    Version 1.4.0 (Custom Build)
-echo =======================================
-echo.
-echo Starting NCG Remote Access...
-echo.
-start "" "NCG-Remote-Access.exe"
-echo.
-echo Your ID will appear in the main window.
-echo Share this ID with NCG support when requested.
-echo.
-echo Server: rust.northwoodscomputerguy.com
-echo Support: https://northwoodscomputerguy.com
-echo.
-echo Press any key to close this window...
-pause >nul
-"@
-        $batchFile | Out-File -FilePath "$output\Start-NCG-Remote.bat" -Encoding ASCII
+        # Create batch file
+        $batchLines = @(
+            "@echo off",
+            "title NCG Remote Access",
+            "color 0A",
+            "echo =======================================",
+            "echo    NCG Remote Access Tool",
+            "echo    Version 1.4.0 Custom Build",
+            "echo =======================================",
+            "echo.",
+            "echo Starting NCG Remote Access...",
+            "echo.",
+            'start "" "NCG-Remote-Access.exe"',
+            "echo.",
+            "echo Your ID will appear in the main window.",
+            "echo Share this ID with NCG support when requested.",
+            "echo.",
+            "echo Server: rust.northwoodscomputerguy.com",
+            "echo Support: https://northwoodscomputerguy.com",
+            "echo.",
+            "echo Press any key to close this window...",
+            "pause >nul"
+        )
+        $batchLines -join "`r`n" | Out-File -FilePath "$output\Start-NCG-Remote.bat" -Encoding ASCII
         
         # Create README
-        $readme = @"
-NCG Remote Access Tool
-======================
-Version: 1.4.0 (Custom Build)
-Build Date: $(Get-Date -Format "yyyy-MM-dd HH:mm")
-
-QUICK START:
-------------
-1. Double-click "Start-NCG-Remote.bat" or "NCG-Remote-Access.exe"
-2. Your ID will be displayed in the main window
-3. Share this ID with NCG support when requested
-
-FEATURES:
----------
-✅ Connects to NCG's private server for security
-✅ No installation required (portable)
-✅ Automatic configuration
-✅ Based on RustDesk 1.4 (stable version)
-
-TROUBLESHOOTING:
-----------------
-If the program doesn't start:
-1. Make sure Windows Defender isn't blocking it
-2. Try right-click > "Run as Administrator"
-3. Check that you have Visual C++ Redistributables installed
-4. Contact support at https://northwoodscomputerguy.com
-
-SERVER DETAILS:
----------------
-Server: rust.northwoodscomputerguy.com
-Port: 21116 (main), 21117 (relay)
-
-SUPPORT:
---------
-Website: https://northwoodscomputerguy.com
-
-This tool is configured to connect exclusively to NCG's
-secure server infrastructure for your privacy and security.
-"@
-        $readme | Out-File -FilePath "$output\README.txt" -Encoding UTF8
+        $readmeContent = "NCG Remote Access Tool`r`n"
+        $readmeContent += "======================`r`n"
+        $readmeContent += "Version: 1.4.0 Custom Build`r`n"
+        $readmeContent += "Build Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`n`r`n"
+        $readmeContent += "QUICK START:`r`n"
+        $readmeContent += "1. Double-click Start-NCG-Remote.bat`r`n"
+        $readmeContent += "2. Share your ID with NCG support`r`n`r`n"
+        $readmeContent += "Server: rust.northwoodscomputerguy.com`r`n"
+        $readmeContent += "Support: https://northwoodscomputerguy.com`r`n"
+        $readmeContent | Out-File -FilePath "$output\README.txt" -Encoding UTF8
         
         # Create version info
-        @{
+        $versionInfo = @{
             Version = "1.4.0"
             BuildNumber = "${{ github.run_number }}"
             BuildDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
             GitCommit = "${{ github.sha }}"
             Server = "rust.northwoodscomputerguy.com"
-            Features = if (Test-Path "target\release\rustdesk.exe") { "Full" } else { "Minimal" }
-        } | ConvertTo-Json | Out-File -FilePath "$output\version.json" -Encoding UTF8
+        }
+        $versionInfo | ConvertTo-Json | Out-File -FilePath "$output\version.json" -Encoding UTF8
         
-        # List all files in the package
-        Write-Host "📦 Package contents:"
-        Get-ChildItem $output | Format-Table Name, Length, LastWriteTime
+        Get-ChildItem $output
         
-        # Get file size
-        $exeSize = (Get-Item "$output\NCG-Remote-Access.exe").Length / 1MB
-        Write-Host "✅ Executable size: $([math]::Round($exeSize, 2)) MB"
-        
-        # Create ZIP archive
         Compress-Archive -Path "$output\*" -DestinationPath "NCG-Remote-Portable.zip" -Force
-        Write-Host "✅ Created NCG-Remote-Portable.zip"
+        Write-Host "Created NCG-Remote-Portable.zip"
     
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
@@ -293,30 +233,16 @@ secure server infrastructure for your privacy and security.
         body: |
           # NCG Remote Access Tool
           
-          ## 📥 Download
-          **[NCG-Remote-Portable.zip]** - Ready to use, no installation needed!
+          Download: **NCG-Remote-Portable.zip**
           
-          ## 🚀 Quick Start
-          1. Download and extract `NCG-Remote-Portable.zip`
-          2. Double-click `Start-NCG-Remote.bat`
-          3. Share your ID with NCG support when requested
+          ## Quick Start
+          1. Download and extract NCG-Remote-Portable.zip
+          2. Double-click Start-NCG-Remote.bat
+          3. Share your ID with NCG support
           
-          ## ✨ Features
-          - Based on RustDesk 1.4.0 (stable version)
-          - Pre-configured for NCG's secure server
-          - Portable - no installation required
-          - Windows 7, 8, 10, and 11 compatible
+          Server: rust.northwoodscomputerguy.com
           
-          ## 🔒 Security
-          This build connects exclusively to NCG's private server infrastructure.
-          
-          Server: `rust.northwoodscomputerguy.com`
-          
-          ## 📞 Support
-          Visit: https://northwoodscomputerguy.com
-          
-          ---
-          Build #${{ github.run_number }} | Commit: ${{ github.sha }}
+          Build ${{ github.run_number }} | Commit: ${{ github.sha }}
         files: NCG-Remote-Portable.zip
         draft: false
         prerelease: false
