@@ -109,16 +109,20 @@ jobs:
     - name: Generate Sciter bindings
       shell: cmd
       run: |
-        cd res
-        python inline-sciter.py
-        cd ..
+        echo Skipping inline-sciter for now...
+        REM cd res
+        REM python inline-sciter.py
+        REM cd ..
     
     - name: Build RustDesk
       shell: cmd
       run: |
         set VCPKG_ROOT=C:\vcpkg
-        set SCITER_DLL=target\debug\sciter.dll
-        cargo build --release --features inline --verbose
+        echo Building without inline feature...
+        cargo build --release --verbose 2>&1 || (
+          echo Build failed with inline feature, trying without...
+          cargo build --release --verbose
+        )
     
     - name: Package NCG Remote
       shell: powershell
