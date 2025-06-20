@@ -59,6 +59,8 @@ jobs:
         bootstrap-vcpkg.bat
         vcpkg.exe integrate install
         vcpkg.exe install --triplet x64-windows-static libvpx libyuv opus aom
+        echo Checking opus installation...
+        dir C:\vcpkg\installed\x64-windows-static\include\opus\
     
     - name: Check Sciter files
       shell: powershell
@@ -85,26 +87,12 @@ jobs:
         $cargo = $cargo -replace 'FileDescription = "RustDesk Remote Desktop"', 'FileDescription = "NCG Remote Access Tool"'
         $cargo | Set-Content Cargo.toml
         
-        # Create custom server config
+        # Create custom server config file (don't modify build.rs)
         @'
         pub const CUSTOM_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com:21116";
         pub const RELAY_SERVER: &str = "rust.northwoodscomputerguy.com:21117";
         pub const PUBLIC_KEY: &str = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=";
         '@ | Out-File -FilePath "src/ncg_config.rs" -Encoding UTF8
-        
-        # Update build configuration
-        if (Test-Path "build.rs") {
-            $buildContent = Get-Content "build.rs" -Raw
-            # Add NCG config to the build
-            $ncgConfig = @"
-        
-        // NCG Custom Configuration
-        println!("cargo:rustc-env=RENDEZVOUS_SERVER=rust.northwoodscomputerguy.com:21116");
-        println!("cargo:rustc-env=RS_PUB_KEY=sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=");
-        "@
-            $buildContent = $buildContent + $ncgConfig
-            $buildContent | Set-Content "build.rs"
-        }
     
     - name: Generate Sciter bindings
       shell: cmd
@@ -118,6 +106,7 @@ jobs:
       shell: cmd
       run: |
         set VCPKG_ROOT=C:\vcpkg
+        set LIBCLANG_PATH=C:\Program Files\LLVM\bin
         echo Building without inline feature...
         cargo build --release --verbose 2>&1 || (
           echo Build failed with inline feature, trying without...
