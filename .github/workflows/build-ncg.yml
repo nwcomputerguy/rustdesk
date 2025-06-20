@@ -2,79 +2,104 @@ name: Build NCG Remote Access
 
 on:
   push:
-    branches: [ main, master, stable ]
+    branches: [ main, master ]
   workflow_dispatch:
-    inputs:
-      version_tag:
-        description: 'Version tag (e.g., 1.3.3)'
-        required: false
-        default: 'latest'
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2019
     
     steps:
-    - uses: actions/checkout@v3
-    
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
+    - uses: actions/checkout@v4
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: 1.65.0
+        targets: x86_64-pc-windows-msvc
     
-    - name: Setup Rust Cache
-      uses: Swatinem/rust-cache@v2
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
     
-    - name: Install Dependencies
+    - name: Install NASM
+      uses: ilammy/setup-nasm@v1
+    
+    - name: Install LLVM and Clang
+      uses: KyleMayes/install-llvm-action@v1
+      with:
+        version: "11.0"
+        directory: ${{ runner.temp }}/llvm
+    
+    - name: Set up environment
+      shell: cmd
       run: |
-        # Install vcpkg for C++ dependencies
+        echo LIBCLANG_PATH=${{ runner.temp }}/llvm/lib>> %GITHUB_ENV%
+        echo LLVM_PATH=${{ runner.temp }}/llvm>> %GITHUB_ENV%
+    
+    - name: Install vcpkg packages
+      shell: cmd
+      run: |
+        cd C:\
         git clone https://github.com/Microsoft/vcpkg.git
         cd vcpkg
-        ./bootstrap-vcpkg.bat
-        ./vcpkg integrate install
-        cd ..
-        
-    - name: Prepare Custom Branding
+        bootstrap-vcpkg.bat
+        vcpkg integrate install
+        vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static
+    
+    - name: Update server configuration
+      shell: powershell
       run: |
-        # Create custom configuration
-        @"
-        pub const CUSTOM_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com:21116";
-        pub const RENDEZVOUS_SERVERS: &[&str] = &["rust.northwoodscomputerguy.com:21116"];
+        # Create directory if it doesn't exist
+        New-Item -ItemType Directory -Force -Path src
+        
+        # Update server config
+        $serverConfig = @"
+        pub const PROD_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com";
+        pub const PROD_RENDEZVOUS_PORT: i32 = 21116;
+        pub const PROD_RELAY_PORT: i32 = 21117;
         pub const PUBLIC_KEY: &str = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=";
-        "@ | Out-File -FilePath src/custom_server.rs -Encoding UTF8
+        "@
         
-    - name: Update Branding in Code
-      run: |
-        # Update application name in Cargo.toml
-        (Get-Content Cargo.toml) -replace 'name = "rustdesk"', 'name = "ncg-remote"' | Set-Content Cargo.toml
-        
-        # Update window title
-        $files = Get-ChildItem -Path src -Filter *.rs -Recurse
-        foreach ($file in $files) {
-          (Get-Content $file.FullName) -replace 'RustDesk', 'NCG Remote Access' | Set-Content $file.FullName
+        # Check if server.rs exists and update it
+        if (Test-Path "src/server.rs") {
+            $content = Get-Content "src/server.rs" -Raw
+            # Add your server config at the beginning
+            $newContent = $serverConfig + "`n`n" + $content
+            Set-Content "src/server.rs" $newContent
         }
         
-    - name: Build Executable
+        # Update Cargo.toml
+        if (Test-Path "Cargo.toml") {
+            $cargoContent = Get-Content "Cargo.toml" -Raw
+            $cargoContent = $cargoContent -replace 'name = "rustdesk"', 'name = "ncg_remote"'
+            Set-Content "Cargo.toml" $cargoContent
+        }
+    
+    - name: Build RustDesk
+      shell: cmd
       run: |
-        # Set your server configuration
-        $env:RUSTDESK_CUSTOM_RENDEZVOUS_SERVER = "rust.northwoodscomputerguy.com:21116"
-        $env:RUSTDESK_KEY = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY="
-        
-        # Build with your configuration
+        set VCPKG_ROOT=C:\vcpkg
+        python res/inline-sciter.py
         cargo build --release --features inline
-        
-    - name: Create Portable Version
+    
+    - name: Create portable package
+      shell: powershell
       run: |
-        # Copy executable
+        # Create portable directory
         New-Item -ItemType Directory -Force -Path "NCG-Remote-Portable"
-        Copy-Item "target/release/rustdesk.exe" "NCG-Remote-Portable/NCG-Remote-Access.exe"
         
-        # Create config file
+        # Copy executable (handle both possible names)
+        if (Test-Path "target\release\rustdesk.exe") {
+            Copy-Item "target\release\rustdesk.exe" "NCG-Remote-Portable\NCG-Remote-Access.exe"
+        } elseif (Test-Path "target\release\ncg_remote.exe") {
+            Copy-Item "target\release\ncg_remote.exe" "NCG-Remote-Portable\NCG-Remote-Access.exe"
+        }
+        
+        # Create config
         @"
-        rendezvous_server = 'rust.northwoodscomputerguy.com:21116'
+        rendezvous_server = 'rust.northwoodscomputerguy.com'
         nat_type = 1
         serial = 0
         
@@ -82,125 +107,58 @@ jobs:
         custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116'
         key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY='
         relay-server = 'rust.northwoodscomputerguy.com:21117'
-        api-server = ''
-        "@ | Out-File -FilePath "NCG-Remote-Portable/RustDesk2.toml" -Encoding UTF8
+        "@ | Out-File -FilePath "NCG-Remote-Portable\RustDesk.toml" -Encoding UTF8
         
-        # Create batch file for easy running
+        # Create batch file
         @"
         @echo off
         echo Starting NCG Remote Access...
         start NCG-Remote-Access.exe
-        "@ | Out-File -FilePath "NCG-Remote-Portable/Start-NCG-Remote.bat" -Encoding UTF8
+        "@ | Out-File -FilePath "NCG-Remote-Portable\Start-NCG-Remote.bat" -Encoding ASCII
         
-        # Zip it up
-        Compress-Archive -Path "NCG-Remote-Portable/*" -DestinationPath "NCG-Remote-Portable.zip"
+        # Create simple readme
+        @"
+        NCG Remote Access Tool
+        ======================
         
-    - name: Create Installer
-      run: |
-        # Download NSIS
-        Invoke-WebRequest -Uri "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.09/nsis-3.09-setup.exe" -OutFile "nsis-setup.exe"
-        Start-Process -FilePath "nsis-setup.exe" -ArgumentList "/S" -Wait
+        Double-click NCG-Remote-Access.exe to start.
         
-        # Create NSIS script
-        @'
-        !define APPNAME "NCG Remote Access"
-        !define COMPANYNAME "Northwoods Computer Guy"
-        !define DESCRIPTION "Remote access tool for NCG customers"
-        !define VERSIONMAJOR 1
-        !define VERSIONMINOR 3
-        !define VERSIONBUILD 3
-        !define HELPURL "https://northwoodscomputerguy.com"
-        !define UPDATEURL "https://northwoodscomputerguy.com"
-        !define ABOUTURL "https://northwoodscomputerguy.com"
+        Your ID will be shown in the window.
+        Share this ID with NCG support when needed.
         
-        RequestExecutionLevel admin
-        InstallDir "$PROGRAMFILES\${APPNAME}"
-        Name "${APPNAME}"
-        outFile "NCG-Remote-Setup.exe"
+        Support: https://northwoodscomputerguy.com
+        "@ | Out-File -FilePath "NCG-Remote-Portable\README.txt" -Encoding UTF8
         
-        !include LogicLib.nsh
-        !include MUI2.nsh
-        
-        !insertmacro MUI_PAGE_WELCOME
-        !insertmacro MUI_PAGE_DIRECTORY
-        !insertmacro MUI_PAGE_INSTFILES
-        !insertmacro MUI_PAGE_FINISH
-        !insertmacro MUI_LANGUAGE "English"
-        
-        Section "install"
-            SetOutPath $INSTDIR
-            File "target\release\rustdesk.exe"
-            
-            # Create desktop shortcut
-            CreateShortcut "$DESKTOP\NCG Remote Access.lnk" "$INSTDIR\rustdesk.exe"
-            
-            # Create start menu entry
-            CreateDirectory "$SMPROGRAMS\${APPNAME}"
-            CreateShortcut "$SMPROGRAMS\${APPNAME}\NCG Remote Access.lnk" "$INSTDIR\rustdesk.exe"
-            CreateShortcut "$SMPROGRAMS\${APPNAME}\Uninstall.lnk" "$INSTDIR\uninstall.exe"
-            
-            # Registry information for add/remove programs
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayName" "${APPNAME}"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "UninstallString" "$INSTDIR\uninstall.exe"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "Publisher" "${COMPANYNAME}"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "HelpLink" "${HELPURL}"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "URLUpdateInfo" "${UPDATEURL}"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "URLInfoAbout" "${ABOUTURL}"
-            WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "VersionMajor" ${VERSIONMAJOR}
-            WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "VersionMinor" ${VERSIONMINOR}
-            WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "NoModify" 1
-            WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "NoRepair" 1
-            
-            # Create uninstaller
-            WriteUninstaller "$INSTDIR\uninstall.exe"
-        SectionEnd
-        
-        Section "uninstall"
-            Delete "$INSTDIR\rustdesk.exe"
-            Delete "$INSTDIR\uninstall.exe"
-            Delete "$DESKTOP\NCG Remote Access.lnk"
-            Delete "$SMPROGRAMS\${APPNAME}\NCG Remote Access.lnk"
-            Delete "$SMPROGRAMS\${APPNAME}\Uninstall.lnk"
-            RmDir "$SMPROGRAMS\${APPNAME}"
-            RmDir "$INSTDIR"
-            DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
-        SectionEnd
-        '@ | Out-File -FilePath "installer.nsi" -Encoding UTF8
-        
-        # Compile installer
-        & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
-        
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v3
+        # Zip it
+        Compress-Archive -Path "NCG-Remote-Portable\*" -DestinationPath "NCG-Remote-Portable.zip" -Force
+    
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
       with:
-        name: NCG-Remote-Access-Build
+        name: NCG-Remote-Build-${{ github.run_number }}
         path: |
-          NCG-Remote-Setup.exe
           NCG-Remote-Portable.zip
-          target/release/rustdesk.exe
-        
+          NCG-Remote-Portable/NCG-Remote-Access.exe
+          
     - name: Create Release
-      if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/stable'
-      uses: softprops/action-gh-release@v1
+      if: github.event_name == 'workflow_dispatch'
+      uses: softprops/action-gh-release@v2
       with:
-        tag_name: ncg-${{ github.event.inputs.version_tag || github.run_number }}
-        name: NCG Remote Access - ${{ github.event.inputs.version_tag || github.run_number }}
+        tag_name: v1.3.${{ github.run_number }}
+        name: NCG Remote Access v1.3.${{ github.run_number }}
         body: |
           ## NCG Remote Access Tool
           
-          ### Download Options:
-          - **NCG-Remote-Setup.exe** - Installer (Recommended)
-          - **NCG-Remote-Portable.zip** - No installation needed
+          **Download:** NCG-Remote-Portable.zip
           
-          ### Installation Instructions:
-          1. Download NCG-Remote-Setup.exe
-          2. Run the installer (click "Yes" if Windows asks)
-          3. Find "NCG Remote Access" on your desktop
+          ### How to Use:
+          1. Download and extract the ZIP file
+          2. Double-click NCG-Remote-Access.exe
+          3. Share your ID with NCG support when requested
           
-          ### For Support:
-          Visit: https://northwoodscomputerguy.com
-        files: |
-          NCG-Remote-Setup.exe
-          NCG-Remote-Portable.zip
+          This version connects to NCG's private server.
+          
+          Support: https://northwoodscomputerguy.com
+        files: NCG-Remote-Portable.zip
         draft: false
         prerelease: false
