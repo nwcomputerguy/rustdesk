@@ -1,4 +1,4 @@
-name: Build NCG Remote Access (Simple)
+name: Build NCG Remote Access
 
 on:
   push:
@@ -39,61 +39,103 @@ jobs:
         version: "16.0"
         directory: ${{ runner.temp }}/llvm
     
-    - name: Set LIBCLANG_PATH
+    - name: Set environment variables
       shell: cmd
-      run: echo LIBCLANG_PATH=${{ runner.temp }}/llvm/bin >> %GITHUB_ENV%
+      run: |
+        echo LIBCLANG_PATH=${{ runner.temp }}/llvm/bin >> %GITHUB_ENV%
     
     - name: Build NCG Remote Access (No Audio)
       shell: cmd
       run: |
-        echo Building NCG Remote Access without audio features...
+        echo === Building NCG Remote Access (Minimal - No Audio) ===
         cargo build --release --no-default-features --features "use_rubato use_dasp" --verbose
     
     - name: Package NCG Remote
+      shell: cmd
+      run: |
+        mkdir NCG-Remote-Portable
+        copy target\release\rustdesk.exe NCG-Remote-Portable\NCG-Remote-Access.exe
+        
+        echo rendezvous_server = 'rust.northwoodscomputerguy.com:21116' > NCG-Remote-Portable\RustDesk2.toml
+        echo nat_type = 1 >> NCG-Remote-Portable\RustDesk2.toml
+        echo serial = 0 >> NCG-Remote-Portable\RustDesk2.toml
+        echo. >> NCG-Remote-Portable\RustDesk2.toml
+        echo [options] >> NCG-Remote-Portable\RustDesk2.toml
+        echo custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116' >> NCG-Remote-Portable\RustDesk2.toml
+        echo key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=' >> NCG-Remote-Portable\RustDesk2.toml
+        echo relay-server = 'rust.northwoodscomputerguy.com:21117' >> NCG-Remote-Portable\RustDesk2.toml
+        echo api-server = '' >> NCG-Remote-Portable\RustDesk2.toml
+    
+    - name: Create launch script
+      shell: cmd
+      run: |
+        echo @echo off > NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo title NCG Remote Access >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo color 0A >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo echo ======================================= >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo echo    NCG Remote Access Tool >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo echo    Version 1.4.0 >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo echo ======================================= >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo echo. >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo echo Starting NCG Remote Access... >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo start "" "NCG-Remote-Access.exe" >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo echo. >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo echo Your ID will appear in the main window. >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo echo Share this ID with NCG support. >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo echo. >> NCG-Remote-Portable\Start-NCG-Remote.bat
+        echo pause >> NCG-Remote-Portable\Start-NCG-Remote.bat
+    
+    - name: Create README
+      shell: cmd
+      run: |
+        echo NCG Remote Access Tool > NCG-Remote-Portable\README.txt
+        echo ====================== >> NCG-Remote-Portable\README.txt
+        echo Version: 1.4.0 >> NCG-Remote-Portable\README.txt
+        echo Build: ${{ github.run_number }} >> NCG-Remote-Portable\README.txt
+        echo. >> NCG-Remote-Portable\README.txt
+        echo QUICK START: >> NCG-Remote-Portable\README.txt
+        echo 1. Double-click Start-NCG-Remote.bat >> NCG-Remote-Portable\README.txt
+        echo 2. Share your ID with NCG support >> NCG-Remote-Portable\README.txt
+        echo. >> NCG-Remote-Portable\README.txt
+        echo Server: rust.northwoodscomputerguy.com >> NCG-Remote-Portable\README.txt
+        echo Support: https://northwoodscomputerguy.com >> NCG-Remote-Portable\README.txt
+    
+    - name: Create ZIP archive
       shell: powershell
       run: |
-        $output = "NCG-Remote-Portable"
-        New-Item -ItemType Directory -Force -Path $output
-        
-        Copy-Item "target\release\rustdesk.exe" "$output\NCG-Remote-Access.exe"
-        
-        # Create config file
-        @"
-rendezvous_server = 'rust.northwoodscomputerguy.com:21116'
-nat_type = 1
-serial = 0
-
-[options]
-custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116'
-key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY='
-relay-server = 'rust.northwoodscomputerguy.com:21117'
-api-server = ''
-"@ | Out-File -FilePath "$output\RustDesk2.toml" -Encoding UTF8
-        
-        # Create batch file
-        @"
-@echo off
-title NCG Remote Access
-color 0A
-echo =======================================
-echo    NCG Remote Access Tool
-echo    Version 1.4.0
-echo =======================================
-echo.
-echo Starting NCG Remote Access...
-start "" "NCG-Remote-Access.exe"
-echo.
-echo Your ID will appear in the main window.
-echo Share this ID with NCG support.
-echo.
-pause
-"@ | Out-File -FilePath "$output\Start-NCG-Remote.bat" -Encoding ASCII
-        
-        Compress-Archive -Path "$output\*" -DestinationPath "NCG-Remote-Portable.zip" -Force
-        Write-Host "Created NCG-Remote-Portable.zip"
+        Compress-Archive -Path "NCG-Remote-Portable\*" -DestinationPath "NCG-Remote-Portable.zip" -Force
     
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: NCG-Remote-${{ github.run_number }}
         path: NCG-Remote-Portable.zip
+    
+    - name: Create Release
+      if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v1.4.0-ncg.${{ github.run_number }}
+        name: NCG Remote Access v1.4.0 Build ${{ github.run_number }}
+        body: |
+          # NCG Remote Access Tool
+          
+          Download: **NCG-Remote-Portable.zip**
+          
+          ## Quick Start
+          1. Download and extract NCG-Remote-Portable.zip
+          2. Double-click Start-NCG-Remote.bat
+          3. Share your ID with NCG support
+          
+          ## Features
+          - Custom NCG server configuration
+          - Based on RustDesk 1.4.0
+          - Portable - no installation required
+          - Note: Audio features not included in this build
+          
+          Server: rust.northwoodscomputerguy.com
+          
+          Build ${{ github.run_number }} | Commit: ${{ github.sha }}
+        files: NCG-Remote-Portable.zip
+        draft: false
+        prerelease: false
