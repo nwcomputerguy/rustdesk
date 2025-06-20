@@ -57,71 +57,96 @@ jobs:
         version: "16.0"
         directory: ${{ runner.temp }}/llvm
     
-    - name: Install vcpkg dependencies
-      shell: cmd
+    - name: Install vcpkg dependencies and fix opus
+      shell: powershell
       run: |
         cd C:\
         git clone --depth=1 https://github.com/Microsoft/vcpkg.git
         cd vcpkg
-        bootstrap-vcpkg.bat
-        vcpkg.exe integrate install
-        vcpkg.exe install --triplet x64-windows-static libvpx libyuv opus aom
-        echo === Checking opus installation ===
-        dir C:\vcpkg\installed\x64-windows-static\include\opus\
-        echo === Listing all opus headers ===
-        dir /s /b C:\vcpkg\installed\x64-windows-static\include\opus\*.h
-        echo === Checking if opus_multistream.h exists ===
-        if exist "C:\vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h" (
-            echo Found opus_multistream.h
-        ) else (
-            echo WARNING: opus_multistream.h not found!
-        )
+        & .\bootstrap-vcpkg.bat
+        & .\vcpkg.exe integrate install
+        & .\vcpkg.exe install --triplet x64-windows-static libvpx libyuv opus aom
+        
+        Write-Host "=== Checking opus installation ==="
+        $opusInclude = "C:\vcpkg\installed\x64-windows-static\include"
+        
+        # List all opus headers
+        Get-ChildItem -Path $opusInclude -Filter "opus*.h" -Recurse | ForEach-Object {
+            Write-Host "Found: $($_.FullName)"
+        }
+        
+        # Check if headers are in the root include directory or in opus subdirectory
+        $opusHeaderInRoot = Test-Path "$opusInclude\opus.h"
+        $opusHeaderInSubdir = Test-Path "$opusInclude\opus\opus.h"
+        
+        Write-Host "Opus headers in root: $opusHeaderInRoot"
+        Write-Host "Opus headers in opus subdir: $opusHeaderInSubdir"
+        
+        # If headers are in root but not in subdirectory, create the subdirectory structure
+        if ($opusHeaderInRoot -and -not $opusHeaderInSubdir) {
+            Write-Host "Creating opus subdirectory and copying headers..."
+            New-Item -ItemType Directory -Force -Path "$opusInclude\opus"
+            Copy-Item -Path "$opusInclude\opus*.h" -Destination "$opusInclude\opus\" -Force
+            Write-Host "Copied opus headers to opus subdirectory"
+        }
+        
+        # Verify the copy worked
+        if (Test-Path "$opusInclude\opus\opus_multistream.h") {
+            Write-Host "SUCCESS: opus_multistream.h is now available at expected location"
+        } else {
+            Write-Host "WARNING: opus_multistream.h still not found"
+        }
     
-    - name: Set build environment and fix opus
+    - name: Set build environment
       shell: powershell
       run: |
         echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         echo "LIBCLANG_PATH=${{ runner.temp }}\llvm\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         
-        # Set multiple include paths for bindgen
-        $includeArgs = "-IC:\vcpkg\installed\x64-windows-static\include -IC:\vcpkg\installed\x64-windows-static\include\opus"
+        # Add both include paths for bindgen
+        $includeArgs = "-IC:\vcpkg\installed\x64-windows-static\include"
         echo "BINDGEN_EXTRA_CLANG_ARGS=$includeArgs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+    
+    - name: Patch magnum-opus if needed
+      shell: powershell
+      run: |
+        # Find the magnum-opus checkout in cargo cache
+        $magnumOpusDirs = Get-ChildItem -Path "$env:USERPROFILE\.cargo\git\checkouts" -Filter "magnum-opus*" -Directory -Recurse
         
-        # Also set environment variables for the opus build
-        echo "OPUS_INCLUDE_DIR=C:\vcpkg\installed\x64-windows-static\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "OPUS_LIB_DIR=C:\vcpkg\installed\x64-windows-static\lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        
-        # Create pkg-config file
-        $pkgConfigPath = "C:\vcpkg\installed\x64-windows-static\lib\pkgconfig"
-        New-Item -ItemType Directory -Force -Path $pkgConfigPath
-        
-        $opusLines = @(
-            "prefix=C:/vcpkg/installed/x64-windows-static",
-            "exec_prefix=`${prefix}",
-            "libdir=`${exec_prefix}/lib",
-            "includedir=`${prefix}/include",
-            "",
-            "Name: Opus",
-            "Description: Opus codec",
-            "Version: 1.4",
-            "Libs: -L`${libdir} -lopus",
-            "Cflags: -I`${includedir} -I`${includedir}/opus"
-        )
-        $opusLines -join "`n" | Out-File -FilePath "$pkgConfigPath\opus.pc" -Encoding UTF8
-        
-        echo "PKG_CONFIG_PATH=$pkgConfigPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        
-        # Check if we need to create a symlink or copy headers
-        $opusInclude = "C:\vcpkg\installed\x64-windows-static\include\opus"
-        if (Test-Path "$opusInclude\opus.h") {
-            Write-Host "Opus headers are in opus subdirectory"
-            # Check if opus_multistream.h is missing
-            if (-not (Test-Path "$opusInclude\opus_multistream.h")) {
-                Write-Host "WARNING: opus_multistream.h is missing from the opus installation!"
-                # Try to find it elsewhere
-                $foundFiles = Get-ChildItem -Path "C:\vcpkg" -Filter "opus_multistream.h" -Recurse -ErrorAction SilentlyContinue
-                if ($foundFiles) {
-                    Write-Host "Found opus_multistream.h at: $($foundFiles[0].FullName)"
+        foreach ($dir in $magnumOpusDirs) {
+            $opusFfiPath = Join-Path $dir.FullName "opus_ffi.h"
+            if (Test-Path $opusFfiPath) {
+                Write-Host "Found opus_ffi.h at: $opusFfiPath"
+                
+                # Read the current content
+                $content = Get-Content $opusFfiPath -Raw
+                
+                # Check if it's trying to include from opus subdirectory
+                if ($content -match '#include\s+[<"]opus/') {
+                    Write-Host "File uses opus/ subdirectory includes"
+                    
+                    # Create a patched version that tries both paths
+                    $patchedContent = @"
+// Patched to work with different opus installations
+#ifdef __has_include
+  #if __has_include(<opus/opus_multistream.h>)
+    #include <opus/opus_multistream.h>
+  #elif __has_include(<opus_multistream.h>)
+    #include <opus_multistream.h>
+  #else
+    #error "Could not find opus_multistream.h"
+  #endif
+#else
+  // Fallback for compilers without __has_include
+  #include <opus_multistream.h>
+#endif
+"@
+                    # Only patch if not already patched
+                    if ($content -notmatch "__has_include") {
+                        Write-Host "Patching opus_ffi.h..."
+                        $patchedContent | Set-Content -Path $opusFfiPath -Encoding UTF8
+                        Write-Host "Patched opus_ffi.h to handle both include paths"
+                    }
                 }
             }
         }
@@ -144,26 +169,17 @@ jobs:
         )
         $configLines -join "`n" | Out-File -FilePath "src/ncg_config.rs" -Encoding UTF8
     
-    - name: Build RustDesk - Minimal (no audio)
+    - name: Build RustDesk
       shell: cmd
       run: |
         set VCPKG_ROOT=C:\vcpkg
         set LIBCLANG_PATH=${{ runner.temp }}/llvm/bin
-        echo === Starting minimal build without audio ===
-        cargo build --release --no-default-features --features "use_rubato use_dasp" --verbose
-    
-    - name: Build RustDesk - With Audio (if minimal succeeds)
-      if: success()
-      continue-on-error: true
-      shell: cmd
-      run: |
-        set VCPKG_ROOT=C:\vcpkg
-        set LIBCLANG_PATH=${{ runner.temp }}/llvm/bin
-        set BINDGEN_EXTRA_CLANG_ARGS=-IC:\vcpkg\installed\x64-windows-static\include -IC:\vcpkg\installed\x64-windows-static\include\opus
-        set OPUS_INCLUDE_DIR=C:\vcpkg\installed\x64-windows-static\include
-        set OPUS_LIB_DIR=C:\vcpkg\installed\x64-windows-static\lib
-        echo === Attempting full build with audio ===
+        echo === Building NCG Remote Access ===
         cargo build --release --verbose
+        if %ERRORLEVEL% NEQ 0 (
+            echo === Full build failed, trying without audio ===
+            cargo build --release --no-default-features --features "use_rubato use_dasp" --verbose
+        )
     
     - name: Package NCG Remote
       if: success()
