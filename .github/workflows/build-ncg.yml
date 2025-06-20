@@ -5,101 +5,138 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+env:
+  RUST_VERSION: "1.75.0"
+  CARGO_TERM_COLOR: always
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-C target-feature=+crt-static"
+
 jobs:
   build-windows:
-    runs-on: windows-2019
+    runs-on: windows-2022
     
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Setup vcpkg cache
+      uses: actions/github-script@v7
+      with:
+        script: |
+          core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: 1.65.0
+        toolchain: ${{ env.RUST_VERSION }}
         targets: x86_64-pc-windows-msvc
+        components: rustfmt
+    
+    - name: Setup Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: "v1-rust"
     
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.9'
+        python-version: '3.11'
+        architecture: 'x64'
     
     - name: Install NASM
       uses: ilammy/setup-nasm@v1
     
-    - name: Install LLVM and Clang
-      uses: KyleMayes/install-llvm-action@v1
-      with:
-        version: "11.0"
-        directory: ${{ runner.temp }}/llvm
-    
-    - name: Set up environment
-      shell: cmd
-      run: |
-        echo LIBCLANG_PATH=${{ runner.temp }}/llvm/lib>> %GITHUB_ENV%
-        echo LLVM_PATH=${{ runner.temp }}/llvm>> %GITHUB_ENV%
-    
-    - name: Install vcpkg packages
+    - name: Install vcpkg dependencies
       shell: cmd
       run: |
         cd C:\
-        git clone https://github.com/Microsoft/vcpkg.git
+        git clone --depth=1 https://github.com/Microsoft/vcpkg.git
         cd vcpkg
         bootstrap-vcpkg.bat
-        vcpkg integrate install
-        vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static
+        vcpkg.exe integrate install
+        vcpkg.exe install --triplet x64-windows-static libvpx libyuv opus aom
     
-    - name: Update server configuration
+    - name: Check Sciter files
       shell: powershell
       run: |
-        # Create directory if it doesn't exist
-        New-Item -ItemType Directory -Force -Path src
+        # Check if Sciter files exist
+        if (Test-Path "target/debug/api.include") {
+            Write-Host "Sciter files already exist"
+        } else {
+            Write-Host "Downloading Sciter SDK..."
+            # Create directories
+            New-Item -ItemType Directory -Force -Path "target/debug"
+            
+            # Download Sciter SDK
+            $sciterUrl = "https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll"
+            Invoke-WebRequest -Uri $sciterUrl -OutFile "target/debug/sciter.dll"
+        }
+    
+    - name: Customize for NCG
+      shell: powershell
+      run: |
+        # Update Cargo.toml with NCG branding
+        $cargo = Get-Content Cargo.toml -Raw
+        $cargo = $cargo -replace 'ProductName = "RustDesk"', 'ProductName = "NCG Remote Access"'
+        $cargo = $cargo -replace 'FileDescription = "RustDesk Remote Desktop"', 'FileDescription = "NCG Remote Access Tool"'
+        $cargo | Set-Content Cargo.toml
         
-        # Update server config
-        $serverConfig = @"
-        pub const PROD_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com";
-        pub const PROD_RENDEZVOUS_PORT: i32 = 21116;
-        pub const PROD_RELAY_PORT: i32 = 21117;
+        # Create custom server config
+        @'
+        pub const CUSTOM_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com:21116";
+        pub const RELAY_SERVER: &str = "rust.northwoodscomputerguy.com:21117";
         pub const PUBLIC_KEY: &str = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=";
+        '@ | Out-File -FilePath "src/ncg_config.rs" -Encoding UTF8
+        
+        # Update build configuration
+        if (Test-Path "build.rs") {
+            $buildContent = Get-Content "build.rs" -Raw
+            # Add NCG config to the build
+            $ncgConfig = @"
+        
+        // NCG Custom Configuration
+        println!("cargo:rustc-env=RENDEZVOUS_SERVER=rust.northwoodscomputerguy.com:21116");
+        println!("cargo:rustc-env=RS_PUB_KEY=sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=");
         "@
-        
-        # Check if server.rs exists and update it
-        if (Test-Path "src/server.rs") {
-            $content = Get-Content "src/server.rs" -Raw
-            # Add your server config at the beginning
-            $newContent = $serverConfig + "`n`n" + $content
-            Set-Content "src/server.rs" $newContent
+            $buildContent = $buildContent + $ncgConfig
+            $buildContent | Set-Content "build.rs"
         }
-        
-        # Update Cargo.toml
-        if (Test-Path "Cargo.toml") {
-            $cargoContent = Get-Content "Cargo.toml" -Raw
-            $cargoContent = $cargoContent -replace 'name = "rustdesk"', 'name = "ncg_remote"'
-            Set-Content "Cargo.toml" $cargoContent
-        }
+    
+    - name: Generate Sciter bindings
+      shell: cmd
+      run: |
+        cd res
+        python inline-sciter.py
+        cd ..
     
     - name: Build RustDesk
       shell: cmd
       run: |
         set VCPKG_ROOT=C:\vcpkg
-        python res/inline-sciter.py
-        cargo build --release --features inline
+        set SCITER_DLL=target\debug\sciter.dll
+        cargo build --release --features inline --verbose
     
-    - name: Create portable package
+    - name: Package NCG Remote
       shell: powershell
       run: |
-        # Create portable directory
-        New-Item -ItemType Directory -Force -Path "NCG-Remote-Portable"
+        # Create output directory
+        $output = "NCG-Remote-Portable"
+        New-Item -ItemType Directory -Force -Path $output
         
-        # Copy executable (handle both possible names)
+        # Copy main executable
         if (Test-Path "target\release\rustdesk.exe") {
-            Copy-Item "target\release\rustdesk.exe" "NCG-Remote-Portable\NCG-Remote-Access.exe"
-        } elseif (Test-Path "target\release\ncg_remote.exe") {
-            Copy-Item "target\release\ncg_remote.exe" "NCG-Remote-Portable\NCG-Remote-Access.exe"
+            Copy-Item "target\release\rustdesk.exe" "$output\NCG-Remote-Access.exe"
+            Write-Host "Copied main executable"
+        } else {
+            Write-Host "ERROR: rustdesk.exe not found!"
+            exit 1
         }
         
-        # Create config
+        # Create config file with NCG server
         @"
-        rendezvous_server = 'rust.northwoodscomputerguy.com'
+        rendezvous_server = 'rust.northwoodscomputerguy.com:21116'
         nat_type = 1
         serial = 0
         
@@ -107,58 +144,116 @@ jobs:
         custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116'
         key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY='
         relay-server = 'rust.northwoodscomputerguy.com:21117'
-        "@ | Out-File -FilePath "NCG-Remote-Portable\RustDesk.toml" -Encoding UTF8
+        api-server = ''
+        "@ | Out-File -FilePath "$output\RustDesk2.toml" -Encoding UTF8
         
-        # Create batch file
+        # Create startup batch file
         @"
         @echo off
+        title NCG Remote Access
+        echo =======================================
+        echo    NCG Remote Access Tool
+        echo =======================================
+        echo.
         echo Starting NCG Remote Access...
-        start NCG-Remote-Access.exe
-        "@ | Out-File -FilePath "NCG-Remote-Portable\Start-NCG-Remote.bat" -Encoding ASCII
+        echo.
+        start "" "NCG-Remote-Access.exe"
+        echo Your ID will appear in the main window.
+        echo Share this ID with NCG support when requested.
+        echo.
+        echo Support: https://northwoodscomputerguy.com
+        echo.
+        timeout /t 5
+        "@ | Out-File -FilePath "$output\Start-NCG-Remote.bat" -Encoding ASCII
         
-        # Create simple readme
+        # Create README
         @"
         NCG Remote Access Tool
         ======================
+        Version: 1.4.0
+        Build Date: $(Get-Date -Format "yyyy-MM-dd")
         
-        Double-click NCG-Remote-Access.exe to start.
+        QUICK START:
+        ------------
+        1. Double-click "Start-NCG-Remote.bat" or "NCG-Remote-Access.exe"
+        2. Your ID will be displayed in the main window
+        3. Share this ID with NCG support when requested
         
-        Your ID will be shown in the window.
-        Share this ID with NCG support when needed.
+        FEATURES:
+        ---------
+        - Connects to NCG's private server for security
+        - No installation required (portable)
+        - Automatic configuration
         
-        Support: https://northwoodscomputerguy.com
-        "@ | Out-File -FilePath "NCG-Remote-Portable\README.txt" -Encoding UTF8
+        TROUBLESHOOTING:
+        ----------------
+        If the program doesn't start:
+        1. Make sure Windows Defender isn't blocking it
+        2. Try right-click > "Run as Administrator"
+        3. Contact support at https://northwoodscomputerguy.com
         
-        # Zip it
-        Compress-Archive -Path "NCG-Remote-Portable\*" -DestinationPath "NCG-Remote-Portable.zip" -Force
+        SUPPORT:
+        --------
+        Website: https://northwoodscomputerguy.com
+        
+        This tool is configured to connect exclusively to NCG's
+        secure server infrastructure.
+        "@ | Out-File -FilePath "$output\README.txt" -Encoding UTF8
+        
+        # Create version info
+        @{
+            Version = "1.4.0"
+            BuildNumber = "${{ github.run_number }}"
+            BuildDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            GitCommit = "${{ github.sha }}"
+            Server = "rust.northwoodscomputerguy.com"
+        } | ConvertTo-Json | Out-File -FilePath "$output\version.json" -Encoding UTF8
+        
+        # Zip the portable version
+        Compress-Archive -Path "$output\*" -DestinationPath "NCG-Remote-Portable.zip" -Force
+        
+        Write-Host "Package created successfully!"
+        Get-ChildItem $output
     
-    - name: Upload Build Artifacts
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: NCG-Remote-Build-${{ github.run_number }}
+        name: NCG-Remote-${{ github.run_number }}
         path: |
           NCG-Remote-Portable.zip
-          NCG-Remote-Portable/NCG-Remote-Access.exe
-          
+          NCG-Remote-Portable/
+    
     - name: Create Release
       if: github.event_name == 'workflow_dispatch'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: v1.3.${{ github.run_number }}
-        name: NCG Remote Access v1.3.${{ github.run_number }}
+        tag_name: v1.4.0.${{ github.run_number }}
+        name: NCG Remote Access v1.4.0.${{ github.run_number }}
         body: |
-          ## NCG Remote Access Tool
+          # NCG Remote Access Tool
           
-          **Download:** NCG-Remote-Portable.zip
+          ## 📥 Download
+          **[NCG-Remote-Portable.zip]** - Ready to use, no installation needed!
           
-          ### How to Use:
-          1. Download and extract the ZIP file
-          2. Double-click NCG-Remote-Access.exe
+          ## 🚀 Quick Start
+          1. Download and extract `NCG-Remote-Portable.zip`
+          2. Double-click `Start-NCG-Remote.bat`
           3. Share your ID with NCG support when requested
           
-          This version connects to NCG's private server.
+          ## ✨ Features
+          - Based on RustDesk 1.4.0
+          - Pre-configured for NCG's secure server
+          - Portable - no installation required
+          - Windows 7, 8, 10, and 11 compatible
           
-          Support: https://northwoodscomputerguy.com
+          ## 🔒 Security
+          This build connects exclusively to NCG's private server infrastructure.
+          
+          ## 📞 Support
+          Visit: https://northwoodscomputerguy.com
+          
+          ---
+          Build #${{ github.run_number }} | Commit: ${{ github.sha }}
         files: NCG-Remote-Portable.zip
         draft: false
         prerelease: false
