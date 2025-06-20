@@ -1,4 +1,4 @@
-name: Build NCG Remote Access
+name: Build NCG Remote Access (Simple)
 
 on:
   push:
@@ -8,10 +8,8 @@ on:
 env:
   RUST_VERSION: "1.75.0"
   CARGO_TERM_COLOR: always
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: "-C target-feature=+crt-static"
-  VCPKG_ROOT: "C:\\vcpkg"
 
 jobs:
   build-windows:
@@ -22,13 +20,6 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: true
-    
-    - name: Setup vcpkg cache
-      uses: actions/github-script@v7
-      with:
-        script: |
-          core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -42,238 +33,61 @@ jobs:
       with:
         prefix-key: "v1-rust"
     
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        architecture: 'x64'
-    
-    - name: Install NASM
-      uses: ilammy/setup-nasm@v1
-    
     - name: Install LLVM
       uses: KyleMayes/install-llvm-action@v2
       with:
         version: "16.0"
         directory: ${{ runner.temp }}/llvm
     
-    - name: Install vcpkg dependencies and fix opus
-      shell: powershell
-      run: |
-        cd C:\
-        git clone --depth=1 https://github.com/Microsoft/vcpkg.git
-        cd vcpkg
-        & .\bootstrap-vcpkg.bat
-        & .\vcpkg.exe integrate install
-        & .\vcpkg.exe install --triplet x64-windows-static libvpx libyuv opus aom
-        
-        Write-Host "=== Checking opus installation ==="
-        $opusInclude = "C:\vcpkg\installed\x64-windows-static\include"
-        
-        # List all opus headers
-        Get-ChildItem -Path $opusInclude -Filter "opus*.h" -Recurse | ForEach-Object {
-            Write-Host "Found: $($_.FullName)"
-        }
-        
-        # Check if headers are in the root include directory or in opus subdirectory
-        $opusHeaderInRoot = Test-Path "$opusInclude\opus.h"
-        $opusHeaderInSubdir = Test-Path "$opusInclude\opus\opus.h"
-        
-        Write-Host "Opus headers in root: $opusHeaderInRoot"
-        Write-Host "Opus headers in opus subdir: $opusHeaderInSubdir"
-        
-        # If headers are in root but not in subdirectory, create the subdirectory structure
-        if ($opusHeaderInRoot -and -not $opusHeaderInSubdir) {
-            Write-Host "Creating opus subdirectory and copying headers..."
-            New-Item -ItemType Directory -Force -Path "$opusInclude\opus"
-            Copy-Item -Path "$opusInclude\opus*.h" -Destination "$opusInclude\opus\" -Force
-            Write-Host "Copied opus headers to opus subdirectory"
-        }
-        
-        # Verify the copy worked
-        if (Test-Path "$opusInclude\opus\opus_multistream.h") {
-            Write-Host "SUCCESS: opus_multistream.h is now available at expected location"
-        } else {
-            Write-Host "WARNING: opus_multistream.h still not found"
-        }
+    - name: Set LIBCLANG_PATH
+      shell: cmd
+      run: echo LIBCLANG_PATH=${{ runner.temp }}/llvm/bin >> %GITHUB_ENV%
     
-    - name: Set build environment
-      shell: powershell
-      run: |
-        echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "LIBCLANG_PATH=${{ runner.temp }}\llvm\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        
-        # Add both include paths for bindgen
-        $includeArgs = "-IC:\vcpkg\installed\x64-windows-static\include"
-        echo "BINDGEN_EXTRA_CLANG_ARGS=$includeArgs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-    
-    - name: Patch magnum-opus if needed
-      shell: powershell
-      run: |
-        # Find the magnum-opus checkout in cargo cache
-        $magnumOpusDirs = Get-ChildItem -Path "$env:USERPROFILE\.cargo\git\checkouts" -Filter "magnum-opus*" -Directory -Recurse
-        
-        foreach ($dir in $magnumOpusDirs) {
-            $opusFfiPath = Join-Path $dir.FullName "opus_ffi.h"
-            if (Test-Path $opusFfiPath) {
-                Write-Host "Found opus_ffi.h at: $opusFfiPath"
-                
-                # Read the current content
-                $content = Get-Content $opusFfiPath -Raw
-                
-                # Check if it's trying to include from opus subdirectory
-                if ($content -match '#include\s+[<"]opus/') {
-                    Write-Host "File uses opus/ subdirectory includes"
-                    
-                    # Create a patched version that tries both paths
-                    $patchedContent = @"
-// Patched to work with different opus installations
-#ifdef __has_include
-  #if __has_include(<opus/opus_multistream.h>)
-    #include <opus/opus_multistream.h>
-  #elif __has_include(<opus_multistream.h>)
-    #include <opus_multistream.h>
-  #else
-    #error "Could not find opus_multistream.h"
-  #endif
-#else
-  // Fallback for compilers without __has_include
-  #include <opus_multistream.h>
-#endif
-"@
-                    # Only patch if not already patched
-                    if ($content -notmatch "__has_include") {
-                        Write-Host "Patching opus_ffi.h..."
-                        $patchedContent | Set-Content -Path $opusFfiPath -Encoding UTF8
-                        Write-Host "Patched opus_ffi.h to handle both include paths"
-                    }
-                }
-            }
-        }
-    
-    - name: Customize for NCG
-      shell: powershell
-      run: |
-        # Update Cargo.toml with NCG branding
-        $cargo = Get-Content Cargo.toml -Raw
-        $cargo = $cargo -replace 'ProductName = "RustDesk"', 'ProductName = "NCG Remote Access"'
-        $cargo = $cargo -replace 'FileDescription = "RustDesk Remote Desktop"', 'FileDescription = "NCG Remote Access Tool"'
-        $cargo | Set-Content Cargo.toml
-        
-        # Create custom server config
-        New-Item -ItemType Directory -Force -Path "src"
-        $configLines = @(
-            'pub const CUSTOM_RENDEZVOUS_SERVER: &str = "rust.northwoodscomputerguy.com:21116";',
-            'pub const RELAY_SERVER: &str = "rust.northwoodscomputerguy.com:21117";',
-            'pub const PUBLIC_KEY: &str = "sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=";'
-        )
-        $configLines -join "`n" | Out-File -FilePath "src/ncg_config.rs" -Encoding UTF8
-    
-    - name: Build RustDesk
+    - name: Build NCG Remote Access (No Audio)
       shell: cmd
       run: |
-        set VCPKG_ROOT=C:\vcpkg
-        set LIBCLANG_PATH=${{ runner.temp }}/llvm/bin
-        echo === Building NCG Remote Access ===
-        cargo build --release --verbose
-        if %ERRORLEVEL% NEQ 0 (
-            echo === Full build failed, trying without audio ===
-            cargo build --release --no-default-features --features "use_rubato use_dasp" --verbose
-        )
+        echo Building NCG Remote Access without audio features...
+        cargo build --release --no-default-features --features "use_rubato use_dasp" --verbose
     
     - name: Package NCG Remote
-      if: success()
       shell: powershell
       run: |
         $output = "NCG-Remote-Portable"
         New-Item -ItemType Directory -Force -Path $output
         
-        if (Test-Path "target\release\rustdesk.exe") {
-            Copy-Item "target\release\rustdesk.exe" "$output\NCG-Remote-Access.exe"
-            Write-Host "Copied main executable"
-            
-            # Check file size to determine if audio is included
-            $fileSize = (Get-Item "$output\NCG-Remote-Access.exe").Length / 1MB
-            $buildType = if ($fileSize -gt 20) { "Full (with audio)" } else { "Minimal (no audio)" }
-            Write-Host "Build type: $buildType (Size: $([math]::Round($fileSize, 2)) MB)"
-        } else {
-            Write-Host "ERROR: rustdesk.exe not found!"
-            exit 1
-        }
+        Copy-Item "target\release\rustdesk.exe" "$output\NCG-Remote-Access.exe"
         
         # Create config file
-        $configLines = @(
-            "rendezvous_server = 'rust.northwoodscomputerguy.com:21116'",
-            "nat_type = 1",
-            "serial = 0",
-            "",
-            "[options]",
-            "custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116'",
-            "key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY='",
-            "relay-server = 'rust.northwoodscomputerguy.com:21117'",
-            "api-server = ''"
-        )
-        $configLines -join "`n" | Out-File -FilePath "$output\RustDesk2.toml" -Encoding UTF8
+        @"
+rendezvous_server = 'rust.northwoodscomputerguy.com:21116'
+nat_type = 1
+serial = 0
+
+[options]
+custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116'
+key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY='
+relay-server = 'rust.northwoodscomputerguy.com:21117'
+api-server = ''
+"@ | Out-File -FilePath "$output\RustDesk2.toml" -Encoding UTF8
         
         # Create batch file
-        $batchLines = @(
-            "@echo off",
-            "title NCG Remote Access",
-            "color 0A",
-            "echo =======================================",
-            "echo    NCG Remote Access Tool",
-            "echo    Version 1.4.0 Custom Build",
-            "echo =======================================",
-            "echo.",
-            "echo Starting NCG Remote Access...",
-            "echo.",
-            'start "" "NCG-Remote-Access.exe"',
-            "echo.",
-            "echo Your ID will appear in the main window.",
-            "echo Share this ID with NCG support when requested.",
-            "echo.",
-            "echo Server: rust.northwoodscomputerguy.com",
-            "echo Support: https://northwoodscomputerguy.com",
-            "echo.",
-            "echo Press any key to close this window...",
-            "pause >nul"
-        )
-        $batchLines -join "`r`n" | Out-File -FilePath "$output\Start-NCG-Remote.bat" -Encoding ASCII
-        
-        # Create README
-        $readmeContent = "NCG Remote Access Tool`r`n"
-        $readmeContent += "======================`r`n"
-        $readmeContent += "Version: 1.4.0 Custom Build`r`n"
-        $readmeContent += "Build Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`n"
-        $readmeContent += "Build Type: $buildType`r`n`r`n"
-        $readmeContent += "QUICK START:`r`n"
-        $readmeContent += "1. Double-click Start-NCG-Remote.bat`r`n"
-        $readmeContent += "2. Share your ID with NCG support`r`n`r`n"
-        $readmeContent += "FEATURES:`r`n"
-        $readmeContent += "- Custom NCG server configuration`r`n"
-        $readmeContent += "- No installation required`r`n"
-        $readmeContent += "- Based on RustDesk 1.4.0`r`n"
-        if ($buildType -eq "Minimal (no audio)") {
-            $readmeContent += "- Note: Audio features disabled in this build`r`n"
-        }
-        $readmeContent += "`r`nSERVER:`r`n"
-        $readmeContent += "rust.northwoodscomputerguy.com`r`n`r`n"
-        $readmeContent += "SUPPORT:`r`n"
-        $readmeContent += "https://northwoodscomputerguy.com`r`n"
-        $readmeContent | Out-File -FilePath "$output\README.txt" -Encoding UTF8
-        
-        # Create version info
-        $versionInfo = @{
-            Version = "1.4.0"
-            BuildNumber = "${{ github.run_number }}"
-            BuildDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            GitCommit = "${{ github.sha }}"
-            Server = "rust.northwoodscomputerguy.com"
-            BuildType = $buildType
-        }
-        $versionInfo | ConvertTo-Json | Out-File -FilePath "$output\version.json" -Encoding UTF8
-        
-        Get-ChildItem $output
+        @"
+@echo off
+title NCG Remote Access
+color 0A
+echo =======================================
+echo    NCG Remote Access Tool
+echo    Version 1.4.0
+echo =======================================
+echo.
+echo Starting NCG Remote Access...
+start "" "NCG-Remote-Access.exe"
+echo.
+echo Your ID will appear in the main window.
+echo Share this ID with NCG support.
+echo.
+pause
+"@ | Out-File -FilePath "$output\Start-NCG-Remote.bat" -Encoding ASCII
         
         Compress-Archive -Path "$output\*" -DestinationPath "NCG-Remote-Portable.zip" -Force
         Write-Host "Created NCG-Remote-Portable.zip"
@@ -282,34 +96,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: NCG-Remote-${{ github.run_number }}
-        path: |
-          NCG-Remote-Portable.zip
-          NCG-Remote-Portable/
-    
-    - name: Create Release
-      if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: v1.4.0-ncg.${{ github.run_number }}
-        name: NCG Remote Access v1.4.0 Build ${{ github.run_number }}
-        body: |
-          # NCG Remote Access Tool
-          
-          Download: **NCG-Remote-Portable.zip**
-          
-          ## Quick Start
-          1. Download and extract NCG-Remote-Portable.zip
-          2. Double-click Start-NCG-Remote.bat
-          3. Share your ID with NCG support
-          
-          ## Features
-          - Custom NCG server configuration
-          - Based on RustDesk 1.4.0
-          - Portable - no installation required
-          
-          Server: rust.northwoodscomputerguy.com
-          
-          Build ${{ github.run_number }} | Commit: ${{ github.sha }}
-        files: NCG-Remote-Portable.zip
-        draft: false
-        prerelease: false
+        path: NCG-Remote-Portable.zip
