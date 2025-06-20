@@ -68,20 +68,33 @@ jobs:
         vcpkg.exe install --triplet x64-windows-static libvpx libyuv opus aom
         echo === Checking opus installation ===
         dir C:\vcpkg\installed\x64-windows-static\include\opus\
-        echo === Checking opus lib ===
-        dir C:\vcpkg\installed\x64-windows-static\lib\
+        echo === Listing all opus headers ===
+        dir /s /b C:\vcpkg\installed\x64-windows-static\include\opus\*.h
+        echo === Checking if opus_multistream.h exists ===
+        if exist "C:\vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h" (
+            echo Found opus_multistream.h
+        ) else (
+            echo WARNING: opus_multistream.h not found!
+        )
     
-    - name: Set build environment
+    - name: Set build environment and fix opus
       shell: powershell
       run: |
         echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "BINDGEN_EXTRA_CLANG_ARGS=-IC:\vcpkg\installed\x64-windows-static\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         echo "LIBCLANG_PATH=${{ runner.temp }}\llvm\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         
+        # Set multiple include paths for bindgen
+        $includeArgs = "-IC:\vcpkg\installed\x64-windows-static\include -IC:\vcpkg\installed\x64-windows-static\include\opus"
+        echo "BINDGEN_EXTRA_CLANG_ARGS=$includeArgs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        
+        # Also set environment variables for the opus build
+        echo "OPUS_INCLUDE_DIR=C:\vcpkg\installed\x64-windows-static\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "OPUS_LIB_DIR=C:\vcpkg\installed\x64-windows-static\lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        
+        # Create pkg-config file
         $pkgConfigPath = "C:\vcpkg\installed\x64-windows-static\lib\pkgconfig"
         New-Item -ItemType Directory -Force -Path $pkgConfigPath
         
-        # Create opus.pc file content line by line
         $opusLines = @(
             "prefix=C:/vcpkg/installed/x64-windows-static",
             "exec_prefix=`${prefix}",
@@ -92,11 +105,26 @@ jobs:
             "Description: Opus codec",
             "Version: 1.4",
             "Libs: -L`${libdir} -lopus",
-            "Cflags: -I`${includedir}"
+            "Cflags: -I`${includedir} -I`${includedir}/opus"
         )
         $opusLines -join "`n" | Out-File -FilePath "$pkgConfigPath\opus.pc" -Encoding UTF8
         
         echo "PKG_CONFIG_PATH=$pkgConfigPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        
+        # Check if we need to create a symlink or copy headers
+        $opusInclude = "C:\vcpkg\installed\x64-windows-static\include\opus"
+        if (Test-Path "$opusInclude\opus.h") {
+            Write-Host "Opus headers are in opus subdirectory"
+            # Check if opus_multistream.h is missing
+            if (-not (Test-Path "$opusInclude\opus_multistream.h")) {
+                Write-Host "WARNING: opus_multistream.h is missing from the opus installation!"
+                # Try to find it elsewhere
+                $foundFiles = Get-ChildItem -Path "C:\vcpkg" -Filter "opus_multistream.h" -Recurse -ErrorAction SilentlyContinue
+                if ($foundFiles) {
+                    Write-Host "Found opus_multistream.h at: $($foundFiles[0].FullName)"
+                }
+            }
+        }
     
     - name: Customize for NCG
       shell: powershell
@@ -116,24 +144,26 @@ jobs:
         )
         $configLines -join "`n" | Out-File -FilePath "src/ncg_config.rs" -Encoding UTF8
     
-    - name: Build RustDesk Full
+    - name: Build RustDesk - Minimal (no audio)
       shell: cmd
       run: |
         set VCPKG_ROOT=C:\vcpkg
         set LIBCLANG_PATH=${{ runner.temp }}/llvm/bin
-        set BINDGEN_EXTRA_CLANG_ARGS=-I"C:\vcpkg\installed\x64-windows-static\include"
-        echo === Build environment ===
-        echo VCPKG_ROOT=%VCPKG_ROOT%
-        echo PKG_CONFIG_PATH=%PKG_CONFIG_PATH%
-        echo === Starting build ===
-        cargo build --release --verbose
+        echo === Starting minimal build without audio ===
+        cargo build --release --no-default-features --features "use_rubato use_dasp" --verbose
     
-    - name: Build RustDesk Minimal
-      if: failure()
+    - name: Build RustDesk - With Audio (if minimal succeeds)
+      if: success()
+      continue-on-error: true
       shell: cmd
       run: |
-        echo === Full build failed, trying without audio ===
-        cargo build --release --no-default-features --features "use_rubato use_dasp" --verbose
+        set VCPKG_ROOT=C:\vcpkg
+        set LIBCLANG_PATH=${{ runner.temp }}/llvm/bin
+        set BINDGEN_EXTRA_CLANG_ARGS=-IC:\vcpkg\installed\x64-windows-static\include -IC:\vcpkg\installed\x64-windows-static\include\opus
+        set OPUS_INCLUDE_DIR=C:\vcpkg\installed\x64-windows-static\include
+        set OPUS_LIB_DIR=C:\vcpkg\installed\x64-windows-static\lib
+        echo === Attempting full build with audio ===
+        cargo build --release --verbose
     
     - name: Package NCG Remote
       if: success()
@@ -145,6 +175,11 @@ jobs:
         if (Test-Path "target\release\rustdesk.exe") {
             Copy-Item "target\release\rustdesk.exe" "$output\NCG-Remote-Access.exe"
             Write-Host "Copied main executable"
+            
+            # Check file size to determine if audio is included
+            $fileSize = (Get-Item "$output\NCG-Remote-Access.exe").Length / 1MB
+            $buildType = if ($fileSize -gt 20) { "Full (with audio)" } else { "Minimal (no audio)" }
+            Write-Host "Build type: $buildType (Size: $([math]::Round($fileSize, 2)) MB)"
         } else {
             Write-Host "ERROR: rustdesk.exe not found!"
             exit 1
@@ -193,12 +228,22 @@ jobs:
         $readmeContent = "NCG Remote Access Tool`r`n"
         $readmeContent += "======================`r`n"
         $readmeContent += "Version: 1.4.0 Custom Build`r`n"
-        $readmeContent += "Build Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`n`r`n"
+        $readmeContent += "Build Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`n"
+        $readmeContent += "Build Type: $buildType`r`n`r`n"
         $readmeContent += "QUICK START:`r`n"
         $readmeContent += "1. Double-click Start-NCG-Remote.bat`r`n"
         $readmeContent += "2. Share your ID with NCG support`r`n`r`n"
-        $readmeContent += "Server: rust.northwoodscomputerguy.com`r`n"
-        $readmeContent += "Support: https://northwoodscomputerguy.com`r`n"
+        $readmeContent += "FEATURES:`r`n"
+        $readmeContent += "- Custom NCG server configuration`r`n"
+        $readmeContent += "- No installation required`r`n"
+        $readmeContent += "- Based on RustDesk 1.4.0`r`n"
+        if ($buildType -eq "Minimal (no audio)") {
+            $readmeContent += "- Note: Audio features disabled in this build`r`n"
+        }
+        $readmeContent += "`r`nSERVER:`r`n"
+        $readmeContent += "rust.northwoodscomputerguy.com`r`n`r`n"
+        $readmeContent += "SUPPORT:`r`n"
+        $readmeContent += "https://northwoodscomputerguy.com`r`n"
         $readmeContent | Out-File -FilePath "$output\README.txt" -Encoding UTF8
         
         # Create version info
@@ -208,6 +253,7 @@ jobs:
             BuildDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
             GitCommit = "${{ github.sha }}"
             Server = "rust.northwoodscomputerguy.com"
+            BuildType = $buildType
         }
         $versionInfo | ConvertTo-Json | Out-File -FilePath "$output\version.json" -Encoding UTF8
         
@@ -239,6 +285,11 @@ jobs:
           1. Download and extract NCG-Remote-Portable.zip
           2. Double-click Start-NCG-Remote.bat
           3. Share your ID with NCG support
+          
+          ## Features
+          - Custom NCG server configuration
+          - Based on RustDesk 1.4.0
+          - Portable - no installation required
           
           Server: rust.northwoodscomputerguy.com
           
