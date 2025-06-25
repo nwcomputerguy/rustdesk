@@ -1,55 +1,72 @@
-name: Package NCG Remote Access
+name: Build NCG Remote Access
 
 on:
+  push:
+    branches: [ main, master, ncg-1.4 ]
   workflow_dispatch:
 
+env:
+  RUST_VERSION: "1.75.0"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-C target-feature=+crt-static"
+
 jobs:
-  package:
-    runs-on: windows-latest
+  build-windows:
+    runs-on: windows-2022
     
     steps:
-    - name: Download RustDesk
-      run: |
-        curl -L -o rustdesk.exe https://github.com/rustdesk/rustdesk/releases/download/1.4.0/rustdesk-1.4.0-x86_64.exe
-      shell: cmd
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: true
     
-    - name: Create package
-      run: |
-        mkdir NCG-Remote
-        copy rustdesk.exe NCG-Remote\NCG-Remote-Access.exe
-      shell: cmd
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ env.RUST_VERSION }}
+        targets: x86_64-pc-windows-msvc
+        components: rustfmt
     
-    - name: Create config
-      run: |
-        echo rendezvous_server = 'rust.northwoodscomputerguy.com:21116' > NCG-Remote\RustDesk2.toml
-        echo nat_type = 1 >> NCG-Remote\RustDesk2.toml
-        echo serial = 0 >> NCG-Remote\RustDesk2.toml
-        echo. >> NCG-Remote\RustDesk2.toml
-        echo [options] >> NCG-Remote\RustDesk2.toml
-        echo custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116' >> NCG-Remote\RustDesk2.toml
-        echo key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY=' >> NCG-Remote\RustDesk2.toml
-        echo relay-server = 'rust.northwoodscomputerguy.com:21117' >> NCG-Remote\RustDesk2.toml
-        echo api-server = '' >> NCG-Remote\RustDesk2.toml
-      shell: cmd
+    - name: Setup Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: "v1-rust"
     
-    - name: Create launcher
-      run: |
-        echo @echo off > NCG-Remote\Start-NCG-Remote.bat
-        echo title NCG Remote Access >> NCG-Remote\Start-NCG-Remote.bat
-        echo echo Starting NCG Remote Access... >> NCG-Remote\Start-NCG-Remote.bat
-        echo start "" NCG-Remote-Access.exe >> NCG-Remote\Start-NCG-Remote.bat
-        echo echo. >> NCG-Remote\Start-NCG-Remote.bat
-        echo echo Your ID will appear in the main window >> NCG-Remote\Start-NCG-Remote.bat
-        echo pause >> NCG-Remote\Start-NCG-Remote.bat
+    - name: Install vcpkg
       shell: cmd
-    
-    - name: Create ZIP
       run: |
-        powershell Compress-Archive -Path NCG-Remote\* -DestinationPath NCG-Remote-Portable.zip
-      shell: cmd
+        cd C:\
+        git clone --depth=1 https://github.com/Microsoft/vcpkg.git
+        cd vcpkg
+        bootstrap-vcpkg.bat
+        vcpkg.exe integrate install
+        vcpkg.exe install --triplet x64-windows-static opus
     
-    - name: Upload package
+    - name: Install LLVM
+      uses: KyleMayes/install-llvm-action@v2
+      with:
+        version: "16.0"
+        directory: ${{ runner.temp }}/llvm
+    
+    - name: Set environment
+      shell: cmd
+      run: |
+        echo VCPKG_ROOT=C:\vcpkg >> %GITHUB_ENV%
+        echo LIBCLANG_PATH=${{ runner.temp }}/llvm/bin >> %GITHUB_ENV%
+    
+    - name: Build RustDesk
+      shell: cmd
+      run: cargo build --release --verbose
+    
+    - name: Package
+      shell: cmd
+      run: |
+        mkdir NCG-Remote-Portable
+        copy target\release\rustdesk.exe NCG-Remote-Portable\NCG-Remote-Access.exe
+    
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: NCG-Remote-Package
-        path: NCG-Remote-Portable.zip
+        name: NCG-Remote-${{ github.run_number }}
+        path: NCG-Remote-Portable/
