@@ -1,72 +1,96 @@
-name: Build NCG Remote Access
+name: Download and Package NCG Remote
 
 on:
-  push:
-    branches: [ main, master, ncg-1.4 ]
   workflow_dispatch:
-
-env:
-  RUST_VERSION: "1.75.0"
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  RUSTFLAGS: "-C target-feature=+crt-static"
+  push:
+    branches: [ main ]
 
 jobs:
-  build-windows:
-    runs-on: windows-2022
+  package:
+    runs-on: windows-latest
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        submodules: true
-    
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: ${{ env.RUST_VERSION }}
-        targets: x86_64-pc-windows-msvc
-        components: rustfmt
-    
-    - name: Setup Rust cache
-      uses: Swatinem/rust-cache@v2
-      with:
-        prefix-key: "v1-rust"
-    
-    - name: Install vcpkg
-      shell: cmd
+    - name: Setup
+      shell: powershell
       run: |
-        cd C:\
-        git clone --depth=1 https://github.com/Microsoft/vcpkg.git
-        cd vcpkg
-        bootstrap-vcpkg.bat
-        vcpkg.exe integrate install
-        vcpkg.exe install --triplet x64-windows-static opus
+        Write-Host "Creating NCG Remote Access package..."
+        New-Item -ItemType Directory -Force -Path "NCG-Remote"
     
-    - name: Install LLVM
-      uses: KyleMayes/install-llvm-action@v2
-      with:
-        version: "16.0"
-        directory: ${{ runner.temp }}/llvm
-    
-    - name: Set environment
-      shell: cmd
+    - name: Download RustDesk
+      shell: powershell
       run: |
-        echo VCPKG_ROOT=C:\vcpkg >> %GITHUB_ENV%
-        echo LIBCLANG_PATH=${{ runner.temp }}/llvm/bin >> %GITHUB_ENV%
+        $url = "https://github.com/rustdesk/rustdesk/releases/download/1.4.0/rustdesk-1.4.0-x86_64.exe"
+        Write-Host "Downloading from $url"
+        Invoke-WebRequest -Uri $url -OutFile "NCG-Remote\NCG-Remote-Access.exe"
+        
+        $file = Get-Item "NCG-Remote\NCG-Remote-Access.exe"
+        Write-Host "Downloaded: $($file.Name) - Size: $([math]::Round($file.Length / 1MB, 2)) MB"
     
-    - name: Build RustDesk
-      shell: cmd
-      run: cargo build --release --verbose
-    
-    - name: Package
-      shell: cmd
+    - name: Create Config
+      shell: powershell
       run: |
-        mkdir NCG-Remote-Portable
-        copy target\release\rustdesk.exe NCG-Remote-Portable\NCG-Remote-Access.exe
+        $config = @"
+rendezvous_server = 'rust.northwoodscomputerguy.com:21116'
+nat_type = 1
+serial = 0
+
+[options]
+custom-rendezvous-server = 'rust.northwoodscomputerguy.com:21116'
+key = 'sjVK2P8Cik7MW4v6sn1FhCN5RdRAK1BpqXlSDraF0qY='
+relay-server = 'rust.northwoodscomputerguy.com:21117'
+api-server = ''
+"@
+        $config | Out-File -FilePath "NCG-Remote\RustDesk2.toml" -Encoding UTF8
+        Write-Host "Created config file"
     
-    - name: Upload artifacts
+    - name: Create Launcher
+      shell: powershell
+      run: |
+        $launcher = @"
+@echo off
+title NCG Remote Access
+color 0A
+echo =======================================
+echo    NCG Remote Access Tool v1.4.0
+echo =======================================
+echo.
+echo Starting NCG Remote Access...
+start "" "NCG-Remote-Access.exe"
+echo.
+echo Your ID will appear in the main window.
+echo Server: rust.northwoodscomputerguy.com
+echo.
+pause
+"@
+        $launcher | Out-File -FilePath "NCG-Remote\Start-NCG-Remote.bat" -Encoding ASCII
+        Write-Host "Created launcher"
+    
+    - name: Create ZIP
+      shell: powershell
+      run: |
+        Compress-Archive -Path "NCG-Remote\*" -DestinationPath "NCG-Remote-Portable.zip" -Force
+        Write-Host "Created NCG-Remote-Portable.zip"
+    
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: NCG-Remote-${{ github.run_number }}
-        path: NCG-Remote-Portable/
+        name: NCG-Remote-Portable
+        path: NCG-Remote-Portable.zip
+    
+    - name: Create Release
+      if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ncg-${{ github.run_number }}
+        name: NCG Remote v1.4.0.${{ github.run_number }}
+        body: |
+          # NCG Remote Access
+          
+          Ready-to-use package with NCG server configuration.
+          
+          **Download:** NCG-Remote-Portable.zip
+          
+          Extract and run Start-NCG-Remote.bat
+        files: NCG-Remote-Portable.zip
+        draft: false
+        prerelease: false
