@@ -13,7 +13,7 @@
 		<PropertyRef Id="AddRemovePropertiesFile" />
 
 		<Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" CompressionLevel="high" />
-		<Icon Id="AppIcon" SourceFile="..\..\icons\ncg-logo.ico" />
+		<Icon Id="AppIcon" SourceFile="..\..\..\icons\ncg-logo.ico" />
 
 		<!-- User Interface -->
 		<WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
