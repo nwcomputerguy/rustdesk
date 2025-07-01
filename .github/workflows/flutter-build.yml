@@ -4,7 +4,7 @@ env:
   CARGO_NDK_VERSION: "3.1.2"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.19.6"
-  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.82.6"
   # vcpkg version: 2024.07.12
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   VCPKG_TAG: "2024.07.12"
@@ -26,165 +26,6 @@ on:
         default: "nightly"
 
 jobs:
-  build-rustdesk-android:
-    name: build rustdesk android apk ${{ matrix.job.target }}
-    runs-on: ${{ matrix.job.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        job:
-          # - { target: aarch64-linux-android, os: ubuntu-20.04,   arch: arm64 }
-          # - { target: armv7-linux-androideabi, os: ubuntu-20.04, arch: armv7 }
-          # - { target: x86_64-linux-android, os: ubuntu-20.04,   arch: x86_64 }
-          # - { target: i686-linux-android, os: ubuntu-20.04,   arch: x86 }
-          - { target: aarch64-linux-android, os: ubuntu-20.04,   arch: arm64 }
-          - { target: armv7-linux-androideabi, os: ubuntu-20.04, arch: armv7 }
-          - { target: x86_64-linux-android, os: ubuntu-20.04,   arch: x86_64 }
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-
-      - name: Install flutter
-        uses: subosito/flutter-action@v2.12.0
-        with:
-          channel: 'stable'
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-
-      - name: Setup vcpkg with Github Actions binary cache
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: ${{ env.VCPKG_TAG }}
-
-      - name: Install vcpkg dependencies
-        run: |
-          $VCPKG_ROOT/vcpkg \
-            install \
-            --binarysource="clear;x-gha,readwrite" \
-            --x-install-root="$VCPKG_ROOT/installed"
-        shell: bash
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: "1.75"
-          targets: ${{ matrix.job.target }}
-          components: 'rustfmt'
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: ${{ matrix.job.os }}
-          key: ${{ matrix.job.target }}-a
-
-      - name: Install flutter rust bridge deps
-        shell: bash
-        run: |
-          dart pub global activate ffigen 5.0.1
-          # dart pub global activate flutter_rust_bridge_codegen 1.80.1
-          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid"
-          pushd flutter && flutter pub get && popd
-
-      - name: Setup vcpkg with Github Actions binary cache
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: ${{ env.VCPKG_TAG }}
-
-      - name: Install vcpkg dependencies
-        run: |
-          $VCPKG_ROOT/vcpkg \
-            install \
-            --binarysource="clear;x-gha,readwrite" \
-            --x-install-root="$VCPKG_ROOT/installed"
-        shell: bash
-
-      - name: Install llvm
-        uses: KyleMayes/install-llvm-action@v1
-        with:
-          version: ${{ env.LLVM_VERSION }}
-
-      - name: Install ndk
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: ${{ env.NDK_VERSION }}
-          add-to-path: true
-
-      - name: Build rustdesk lib
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          rustup target add ${{ matrix.job.target }}
-          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }}
-          case ${{ matrix.job.target }} in
-            aarch64-linux-android)
-              ./flutter/ndk_arm64.sh
-              ;;
-            armv7-linux-androideabi)
-              ./flutter/ndk_arm.sh
-              ;;
-            x86_64-linux-android)
-              ./flutter/ndk_x64.sh
-              ;;
-            i686-linux-android)
-              ./flutter/ndk_x86.sh
-              ;;
-          esac
-
-      - name: Upload Artifacts
-        if: ${{ inputs.upload-artifact }}
-        uses: actions/upload-artifact@master
-        with:
-          name: librustdesk.so.${{ matrix.job.target }}
-          path: |
-            ./target/${{ matrix.job.target }}/release/liblibrustdesk.so
-
-  build-rustdesk-android-universal:
-    needs: [build-rustdesk-android]
-    name: build rustdesk android universal apk
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-
-      - name: Install flutter
-        uses: subosito/flutter-action@v2.12.0
-        with:
-          channel: 'stable'
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-
-      - name: Download all upload artifacts
-        uses: actions/download-artifact@master
-
-      - name: Copy rustdesk lib
-        run: |
-          mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
-          mkdir -p ./flutter/android/app/src/main/jniLibs/armeabi-v7a
-          mkdir -p ./flutter/android/app/src/main/jniLibs/x86_64
-
-          cp ./librustdesk.so.aarch64-linux-android/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
-          cp ./librustdesk.so.armv7-linux-androideabi/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
-          cp ./librustdesk.so.x86_64-linux-android/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/x86_64/librustdesk.so
-
-      - name: Build rustdesk android apk
-        env:
-          JAVA_AWT_HEADLESS: true
-        run: |
-          export PUB_HOSTED_URL=https://pub.flutter-io.cn
-          export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
-          pushd flutter
-          flutter build apk --release
-          popd
-          mkdir -p signed-apk
-          mv flutter/build/app/outputs/flutter-apk/app-release.apk ./signed-apk/rustdesk-${{ env.VERSION }}-universal.apk
-
-      - name: Upload Artifacts
-        if: ${{ inputs.upload-artifact }}
-        uses: actions/upload-artifact@master
-        with:
-          name: rustdesk-universal-apk
-          path: |
-            ./signed-apk
-
   build-rustdesk-linux:
     name: build rustdesk linux ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
@@ -380,88 +221,6 @@ jobs:
           path: |
             rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
 
-  build-rustdesk-linux-flatpak:
-    name: Build flatpak ${{ matrix.job.target }}
-    runs-on: ${{ matrix.job.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        job:
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-20.04, arch: x86_64, extra: "" }
-          - { target: x86_64-unknown-linux-gnu-sciter, os: ubuntu-20.04, arch: x86_64, extra: "-sciter" }
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-
-      - name: Build rustdesk flatpak
-        uses: rustdesk-org/run-on-arch-action@amd64-support
-        with:
-          arch: ${{ matrix.job.arch }}
-          distro: ubuntu20.04
-          githubToken: ${{ github.token }}
-          setup: |
-            ls -l "${PWD}"
-          dockerRunArgs: |
-            --volume "${PWD}:/workspace"
-          shell: /bin/bash
-          install: |
-            apt-get update -y
-            echo 'deb [arch=amd64,i386] https://download.cef.builds.flattened.org/ref/branch/5790 jammy Release' | tee /etc/apt/sources.list.d/cef.list
-            curl -C - -o /etc/apt/trusted.gpg.d/cef.gpg https://download.cef.builds.flattened.org/ref/branch/5790/Release.key
-            apt-get update -y
-            apt-get install -y \
-              curl \
-              git \
-              wget
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            source ~/.cargo/env
-            curl -L https://github.com/appimage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o /usr/bin/appimagetool
-            chmod +x /usr/bin/appimagetool
-            /usr/bin/appimagetool --appimage-extract
-            cp -r /squashfs-root/usr/bin/* /usr/bin/
-            case ${{ matrix.job.extra }} in
-              "")
-                apt-get install -y \
-                  flatpak \
-                  flatpak-builder \
-                  qemu-user-static
-                flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-                flatpak --user install -y flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08 org.freedesktop.Sdk.Extension.llvm16//23.08 org.freedesktop.Sdk.Extension.rust-stable//23.08
-                ;;
-              "-sciter")
-                apt-get install -y \
-                  flatpak \
-                  flatpak-builder \
-                  qemu-user-static \
-                  libsciter-gtk-dev
-                flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-                flatpak --user install -y flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08 org.freedesktop.Sdk.Extension.llvm16//23.08 org.freedesktop.Sdk.Extension.rust-stable//23.08
-                ;;
-            esac
-          run: |
-            cd /workspace
-            # somehow appimagetool-x86_64.AppImage doesn't work, ignored for now
-            source ~/.cargo/env
-            # only build zip package for now, deb package fail to build
-            case ${{ matrix.job.extra }} in
-              "")
-                flatpak-builder --user --bundle-sources --repo=repo --force-clean flatpak_app ./res/com.rustdesk.RustDesk.json
-                flatpak build-bundle repo rustdesk${{ matrix.job.extra }}-${{ env.VERSION }}-${{ matrix.job.arch }}.flatpak com.rustdesk.RustDesk
-                ;;
-              "-sciter")
-                flatpak-builder --user --bundle-sources --repo=repo --force-clean flatpak_app ./res/com.rustdesk.RustDeskSciter.json
-                flatpak build-bundle repo rustdesk${{ matrix.job.extra }}-${{ env.VERSION }}-${{ matrix.job.arch }}.flatpak com.rustdesk.RustDesk
-                ;;
-            esac
-
-      - name: Upload Artifacts
-        if: ${{ inputs.upload-artifact }}
-        uses: actions/upload-artifact@master
-        with:
-          name: rustdesk${{ matrix.job.extra }}-${{ env.VERSION }}-${{ matrix.job.arch }}.flatpak
-          path: |
-            rustdesk${{ matrix.job.extra }}-${{ env.VERSION }}-${{ matrix.job.arch }}.flatpak
-
   build-rustdesk-macos:
     name: ${{ matrix.job.target }} (${{ matrix.job.os }})
     runs-on: ${{ matrix.job.os }}
@@ -597,7 +356,8 @@ jobs:
       - name: Install flutter rust bridge deps
         run: |
           dart pub global activate ffigen 5.0.1
-          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid"
+          # Try newer version first, fallback to working version if needed
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" || cargo install flutter_rust_bridge_codegen --version 1.82.6 --features "uuid"
           Push-Location flutter ; flutter pub get ; Pop-Location
 
       - name: Setup vcpkg with Github Actions binary cache
