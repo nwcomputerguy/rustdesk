@@ -14,7 +14,6 @@
 
 		<Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" CompressionLevel="high" />
 		<Icon Id="AppIcon" SourceFile="..\..\icons\ncg-logo.ico" />
-        <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
 		<!-- User Interface -->
 		<WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
