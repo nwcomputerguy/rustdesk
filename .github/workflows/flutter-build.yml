@@ -4,7 +4,7 @@ env:
   CARGO_NDK_VERSION: "3.1.2"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.19.6"
-  FLUTTER_RUST_BRIDGE_VERSION: "1.82.6"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
   # vcpkg version: 2024.07.12
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   VCPKG_TAG: "2024.07.12"
@@ -70,8 +70,8 @@ jobs:
       - name: Install flutter rust bridge deps
         run: |
           dart pub global activate ffigen 5.0.1
-          # dart pub global activate flutter_rust_bridge_codegen 1.80.1
-          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid"
+          # Use --locked to prevent dependency resolution issues
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
           pushd flutter && flutter pub get && popd
 
       - name: Setup vcpkg with Github Actions binary cache
@@ -255,8 +255,8 @@ jobs:
       - name: Install flutter rust bridge deps
         run: |
           dart pub global activate ffigen 5.0.1
-          # dart pub global activate flutter_rust_bridge_codegen 1.80.1
-          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid"
+          # Use --locked to prevent dependency resolution issues
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
           pushd flutter && flutter pub get && popd
 
       - name: Setup vcpkg with Github Actions binary cache
@@ -356,8 +356,8 @@ jobs:
       - name: Install flutter rust bridge deps
         run: |
           dart pub global activate ffigen 5.0.1
-          # Try newer version first, fallback to working version if needed
-          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" || cargo install flutter_rust_bridge_codegen --version 1.82.6 --features "uuid"
+          # Use --locked to prevent dependency resolution issues
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
           Push-Location flutter ; flutter pub get ; Pop-Location
 
       - name: Setup vcpkg with Github Actions binary cache
